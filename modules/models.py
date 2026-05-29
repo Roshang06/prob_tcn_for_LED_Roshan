@@ -205,6 +205,31 @@ class memory_polynomial_channel(nn.Module):
         self.nonlinearity_order = nonlinearity_order
         self.device = device
 
+    def get_num_regressors(self):
+        return (self.memory_linear + 1) + (self.memory_nonlinear + 1) * (self.nonlinearity_order - 1)
+
+    def _iter_feature_chunks(self, X, Y, batch_chunk):
+        # Chunk over the BATCH dim so each chunk holds complete sequences
+        B, T = X.shape
+        for b0 in range(0, B, batch_chunk):
+            Xb = X[b0:b0 + batch_chunk]                 # [bc, T]
+            A_blk = self._create_regressors(Xb)         # [bc*T, P] only this chunk lives in memory
+            y_blk = Y[b0:b0 + batch_chunk].reshape(-1)  # [bc*T]
+            yield A_blk, y_blk
+
+    def _fit_normal_eqs(self, X, Y, batch_chunk=8, ridge=0.0):
+        P = self.get_num_regressors()
+        G = torch.zeros(P, P, dtype=torch.float64, device=self.device)
+        c = torch.zeros(P,    dtype=torch.float64, device=self.device)
+        for A_blk, y_blk in self._iter_feature_chunks(X, Y, batch_chunk):
+            A_blk = A_blk.double()
+            y_blk = y_blk.double()
+            G += A_blk.T @ A_blk
+            c += A_blk.T @ y_blk
+            del A_blk, y_blk            # release the chunk before building the next one
+        G += ridge * torch.eye(P, dtype=torch.float64, device=self.device)
+        self.weights = torch.linalg.solve(G, c)
+
     def _create_regressors(self, X):
         B, T = X.shape
         # Each example and target will get a matrix and column vector. All will be stacked
@@ -267,15 +292,25 @@ class memory_polynomial_channel(nn.Module):
 
         return terms, weights
 
-    def calculate_err(self, X, Y, plot=False):
+    @torch.no_grad()
+    def calculate_err(self, X, Y, batch_chunk=8, plot=False):
         X = X.to(self.device)
         Y = Y.to(self.device)
-        A = self._create_regressors(X).to(torch.float64)
-        Q, R = torch.linalg.qr(A, mode='reduced')
-        b = Y.flatten().to(torch.float64)
-        # Project onto columns of Q
-        g = torch.matmul(Q.T, b)
-        total_variance = torch.sum(b ** 2)
+        n_regressors = self.get_num_regressors()
+        G = torch.zeros(n_regressors, n_regressors, dtype=torch.float64, device=self.device)
+        c = torch.zeros(n_regressors, dtype=torch.float64, device=self.device)
+        total_variance = torch.zeros((), dtype=torch.float64, device=self.device)
+        for A_blk, y_blk in self._iter_feature_chunks(X, Y, batch_chunk):
+            A_blk = A_blk.double()
+            y_blk = y_blk.double()
+            G += A_blk.T @ A_blk
+            c += A_blk.T @ y_blk
+            total_variance += (y_blk * y_blk).sum()
+            del A_blk, y_blk
+        # Gram = R^T R via Cholesky decomposition; then g = Q^T b = R^{-T} (A^T b) = R^{-T} c => R^{T} g = c
+        # which is a simple triangular system to solve for g, which gives us the variance contribution of each regressor. Then we can calculate ERR as (g_i^2 / total_variance) * 100
+        R = torch.linalg.cholesky(G, upper=True)
+        g = torch.linalg.solve_triangular(R.T, c.unsqueeze(-1), upper=False).squeeze(-1)
         component_variances = g ** 2
         terms, _ = self.show_terms(plot=False)
         ERR_values = (component_variances / total_variance) * 100
@@ -304,20 +339,22 @@ class memory_polynomial_channel(nn.Module):
         return terms, ERR_values
 
 
-    def fit(self, X, Y):
-        X = X.to(self.device)
-        Y = Y.to(self.device)
-        A = self._create_regressors(X)
-        Y_flat = Y.flatten()
+    def fit(self, X, Y, batch_chunk=8, ridge=0.0):
+        X = X.to(self.device); Y = Y.to(self.device)
+        self._fit_normal_eqs(X, Y, batch_chunk=batch_chunk, ridge=ridge)
+        self.weights = self.weights.to(X.dtype)
+        return self.weights
 
-        weights, residuals, rank, s = torch.linalg.lstsq(A, Y_flat, driver='gels')
-        y_pred = A @ weights
-        # Reshape back to (B, T) for analysis
+    @torch.no_grad()
+    def predict(self, X, batch_chunk=8):     # chunked forward
+        X = X.to(self.device)
         B, T = X.shape
-        y_pred = y_pred.reshape(B, T)
-        residuals = Y - y_pred
-        self.weights = weights
-        return weights, A, residuals
+        out = torch.empty(B, T, dtype=self.weights.dtype, device=self.device)
+        for b0 in range(0, B, batch_chunk):
+            A_blk = self._create_regressors(X[b0:b0 + batch_chunk])
+            out[b0:b0 + batch_chunk] = (A_blk @ self.weights).reshape(-1, T)
+            del A_blk
+        return out
 
     def forward(self, X):
         A_x = self._create_regressors(X)
@@ -335,6 +372,12 @@ class GeneralizedMemoryPolynomial(memory_polynomial_channel):
     def __init__(self, weights, memory_linear, memory_nonlinear, nonlinearity_order, cross_term_depth, device):
         super().__init__(weights, memory_linear, memory_nonlinear, nonlinearity_order, device)
         self.cross_term_depth = cross_term_depth
+
+    def get_num_regressors(self):
+        return (
+            (self.memory_linear + 1)
+            + (self.memory_nonlinear + 1) * (self.nonlinearity_order - 1) * (self.cross_term_depth + 1)
+        )
 
     def _create_regressors(self, X):
         B, T = X.shape
