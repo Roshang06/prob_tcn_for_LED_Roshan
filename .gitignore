@@ -5,7 +5,6 @@ notebooks/*
 .vscode/*
 data/**/*.zarr
 debug_logs/*
-experiments/*
 *.pyc
 wandb*
 *.yml
