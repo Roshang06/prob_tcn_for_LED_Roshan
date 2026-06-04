@@ -44,6 +44,7 @@ class SendArbWaveform(ActionBlock):
             freq=self.freq,
             amplitude=self.amplitude,
             offset=self.offset)
+        # print(f"Errors: {self.driver.drain_errors()}")
         
 class MeasureSine(ActionBlock):
     def __init__(self, fs, osc_driver, input_signal_frequency, channel):
@@ -110,7 +111,7 @@ if __name__ == '__main__':
             Exp.log(f"Starting Sine sending at {f}!")
 
             osc.set_horizontal_scale(seconds_per_div=0.1*(1/f))
-            N = 16384 # max arbitrary waveform length for Agilent 33250A
+            N = 16384  # max arbitrary waveform length for Agilent 33250A
             t = np.linspace(0, 1, N, endpoint=False)
             waveform_data = 1 - 2 * np.abs(2 * t - 1)
 
@@ -124,7 +125,8 @@ if __name__ == '__main__':
                               offset=0.0
                               ), # 10 kHz
                 ResampleWaveform(fs_in=fn_gen.output_sample_rate, fs_out=osc.input_sample_rate),
-                MeasureSine(fs=osc.input_sample_rate, osc_driver=osc, input_signal_frequency=f, channel=3)
+                MeasureSine(fs=osc.input_sample_rate, osc_driver=osc, input_signal_frequency=f, channel=3),
+                DisplayWaveform(fs=osc.input_sample_rate)
             ])
             x = Signal(data=None, sampling_rate=fn_gen.output_sample_rate)
             main_pipe.run(x) 

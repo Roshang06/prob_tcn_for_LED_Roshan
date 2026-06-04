@@ -18,6 +18,8 @@ dependencies:
   - scipy
   - wandb
   - seaborn
+  - pyserial
+  - ipykernel
   - pip:
       - torch
       - torchaudio
