@@ -14,3 +14,4 @@ models/pickled_models/*
 *.pt
 data/*/old/*
 *.DS_Store
+exp_state_cache*
