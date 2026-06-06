@@ -14,6 +14,8 @@ from pyflux.core.experiment import ExperimentalContext
 from pyflux.core.block import Signal, ActionBlock, FunctionalBlock, ResamplingBlock
 from pyflux.core.chain import Chain
 import numpy as np
+from modules.experimental_blocks import *
+from modules.constellation_diagram import QPSK_Constellation, get_constellation, RingShapedConstellation
 
 # set the cwd to be parent folder and not workspace root
 script_dir = Path(__file__).resolve().parent
@@ -23,6 +25,8 @@ os.chdir(script_dir)
 if __name__ == '__main__':
     '''Without the main guard, every child process will rerun the code'''
     with ExperimentalContext(CONFIG_FILE="end_to_end_experiment.yml") as Exp:
+
+        # Build the relevant blocks for the experiment
         
         # Setup instruments
         awg = Exp.Agilent_33250A
@@ -46,9 +50,11 @@ if __name__ == '__main__':
                               scale=1,
                               offset=0)
         
-        pwr_supply.set_6V(
-            voltage=1,
-            current=0.5
-        )
-        pwr_supply.enable_output()
-        input("run till input")
+        for dc_offset_ma in Exp.config.DATA_COLLECTION.DC_OFFSETS:
+            # Perform all collection and training with set DC offset
+            pwr_supply.set_6V(
+                voltage=4,
+                current=dc_offset_ma
+            )
+            pwr_supply.enable_output()
+            Exp.log(f"Starting Data Collection with DC offset of {dc_offset_ma} mA!")
