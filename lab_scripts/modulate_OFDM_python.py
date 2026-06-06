@@ -3,8 +3,8 @@ import zarr
 module_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled'
 if module_dir not in sys.path:
     sys.path.append(module_dir)
-from lab_scripts.constellation_diagram import QPSK_Constellation
-from lab_scripts.constellation_diagram import RingShapedConstellation
+from modules.constellation_diagram import QPSK_Constellation
+from modules.constellation_diagram import RingShapedConstellation
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -22,7 +22,7 @@ from scipy.fft import irfft, rfft
 from fractions import Fraction
 from scipy.signal import hilbert, filtfilt, butter
 from modules.utils import calculate_BER, evm_loss, save_validation_data
-from constellation_diagram import get_constellation
+from modules.constellation_diagram import get_constellation
 from encoder_decoder import append_symbol_frame
 # Get logging
 from lab_scripts.logging_code import *

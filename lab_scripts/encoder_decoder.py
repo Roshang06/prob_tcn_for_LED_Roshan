@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as colors
 import time
-from lab_scripts.constellation_diagram import QPSK_Constellation, get_constellation, RingShapedConstellation
+from modules.constellation_diagram import QPSK_Constellation, get_constellation, RingShapedConstellation
 from modules.models import TCN
 from modules.utils import evm_loss, load_runs_final_artifact
 import torch.nn.functional as F
