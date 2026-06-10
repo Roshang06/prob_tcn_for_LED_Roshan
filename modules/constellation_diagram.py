@@ -63,10 +63,13 @@ class QPSK_Constellation(ConstellationDiagram):
         symbols = np.array([bits_to_symbol_map[group] for group in grouped_bits])
         return symbols
 
-    def symbols_to_bits(self, complex_symbols):
-        bit_groups = [self._symbols_to_bits_map[s] for s in complex_symbols]
-        bits = "".join(bit_groups)
-        return bits
+    def symbols_to_bits(self, complex_symbols: np.ndarray) -> str:
+        '''Convert complex symbols back to bits using the symbol-to-bit mapping.'''
+        reference_points = np.array(list(self._symbols_to_bits_map.keys()))
+        distances = np.abs(complex_symbols[:, None] - reference_points[None, :])
+        closest_indices = np.argmin(distances, axis=1)
+        closest_symbols = reference_points[closest_indices]
+        return "".join([self._symbols_to_bits_map[s] for s in closest_symbols])
 
     def visualize_constellation(self):
         reals = np.real(self._complex_symbols)
