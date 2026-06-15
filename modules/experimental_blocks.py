@@ -5,11 +5,14 @@ create results/figures for the manuscript
 from pyflux.core.experiment import ExperimentalContext
 from pyflux.core.block import Signal, ActionBlock, FunctionalBlock, ResamplingBlock
 from pyflux.core.chain import Chain
+from pathlib import Path
 from scipy.signal import resample_poly, find_peaks, correlate, resample
 from fractions import Fraction
 import matplotlib.pyplot as plt
 import numpy as np
+import zarr
 import time
+from datetime import datetime
 
 def generate_random_bits(N) -> str:
     x = np.random.randint(0, 2, size=N)
@@ -83,7 +86,7 @@ class ModulateDataOFDM(FunctionalBlock):
         time_domain_signal = np.fft.irfft(half_spectrum, n=self.baseband_fft_length, norm='ortho') # Use sinc interpolation for smooth analog waveform
 
         cyclic_prefix = time_domain_signal[-self.cyclic_prefix_length:]
-        time_domain_signal = np.concatenate((cyclic_prefix, time_domain_signal))
+        time_domain_signal_with_cp = np.concatenate((cyclic_prefix, time_domain_signal))
 
         if self.preamble_method == "zadoff_chu":
             preamble = generate_zadoff_chu(self.preamble_length)
@@ -94,8 +97,8 @@ class ModulateDataOFDM(FunctionalBlock):
         # so the preamble always owns the global peak and normalizes to a constant
         # height after the AWG's global normalization.
         preamble = 3 * preamble / np.max(np.abs(preamble))
-        time_domain_signal = np.clip(time_domain_signal, -3, 3)
-        baseband_burst = np.concatenate((preamble, time_domain_signal))
+        time_domain_signal_with_cp = np.clip(time_domain_signal_with_cp, -3, 3)
+        baseband_burst = np.concatenate((preamble, time_domain_signal_with_cp))
 
 
         # Now, upsample from baseband sampling rate to AWG sampling rate with sinc interpolation
@@ -107,7 +110,7 @@ class ModulateDataOFDM(FunctionalBlock):
             preamble=preamble,               
             source_bits=source_bits,
             sent_symbols=active_subcarriers,
-            sent_baseband=baseband_burst,    # model x[t]
+            sent_baseband=time_domain_signal,    # model x[t]
             awg_waveform=awg_waveform,       # outputlength points for the instrument
             awg_frequency=self.awg_frequency,
         )
@@ -287,3 +290,69 @@ class SendAndReceiveOFDM(Chain):
                  demodulate_block: DemodulateDataOFDM
                  ):
         super().__init__([modulate_block, send_block, receive_block, resample_block, demodulate_block])
+
+
+class AppendToDataset(ActionBlock):
+    def __init__(self,
+                 fs_in: float,
+                 dc_offset: float,
+                 f_min: float,
+                 f_max: float,
+                 active_carrier_indices,
+                 modulation_format: str,
+                 block_size: int = 64,
+                 dataset_path: Path = None):
+        super().__init__(fs_in)
+        self.block_size = block_size
+        self._arrays = None
+
+        if dataset_path is not None:
+            self.dataset_path = Path(dataset_path).resolve()
+            self.group = zarr.open_group(self.dataset_path, mode="a")
+            print(f"[AppendToDataset] appending to existing dataset: {self.dataset_path}")
+            return
+
+        sweeps_dir = Path(__file__).resolve().parents[1] / "data" / "sweeps"
+        sweeps_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        name = f"dc{dc_offset:g}A_fmin{f_min:g}_fmax{f_max:g}_{timestamp}.zarr"
+        self.dataset_path = sweeps_dir / name
+
+        self.group = zarr.open_group(self.dataset_path, mode="w-")
+        self.group.attrs.update({
+            "dc_offset_A": float(dc_offset),
+            "f_min_hz": float(f_min),
+            "f_max_hz": float(f_max),
+            "active_carrier_indices": np.asarray(active_carrier_indices).astype(int).tolist(),
+            "modulation_format": str(modulation_format),
+        })
+        print(f"[AppendToDataset] created new dataset: {self.dataset_path}")
+
+    @staticmethod
+    def _bits_to_array(bits):
+        if isinstance(bits, str):
+            return np.array([int(b) for b in bits], dtype="uint8")
+        return np.asarray(bits, dtype="uint8")
+
+    def _init_arrays(self, fields):
+        b = self.block_size
+        self._arrays = {}
+        for name, row in fields.items():
+            if name in self.group:
+                self._arrays[name] = self.group[name]
+            else:
+                self._arrays[name] = self.group.create_array(
+                    name, shape=(0, row.shape[0]), chunks=(b, row.shape[0]), dtype=row.dtype)
+
+    def action(self, x: Signal):
+        fields = {
+            "sent_baseband": np.asarray(x.artifact_container["sent_baseband"], dtype="float32"),
+            "received_baseband": np.asarray(x.data, dtype="float32"),
+            "source_bits": self._bits_to_array(x.artifact_container["source_bits"]),
+            "decoded_bits": self._bits_to_array(x.artifact_container["estimated_bits"]),
+        }
+        if self._arrays is None:
+            self._init_arrays(fields)
+        for name, row in fields.items():
+            self._arrays[name].append(row[None, :])
+        return x

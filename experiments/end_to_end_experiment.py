@@ -70,6 +70,9 @@ if __name__ == '__main__':
         awg_table_fraction = Exp.config.DATA_COLLECTION.AWG_TABLE_FRACTION
         cp_length_fraction = Exp.config.DATA_COLLECTION.CP_LENGTH_FRACTION
         preamble_length = Exp.config.DATA_COLLECTION.PREAMBLE_LENGTH
+        modulation_format = Exp.config.DATA_COLLECTION.MODULATION_FORMAT
+        num_samples_gathered = Exp.config.DATA_COLLECTION.N
+        dataset_path = Exp.config.DATA_COLLECTION.DATASET_PATH
 
         for dc_offset_A, min_freq, max_freq, osc_fs in zip(dc_offsets, min_subcarrier_freqs, max_subcarrier_freqs, osc_sample_rates):
             dc_offset_A = float(dc_offset_A)
@@ -122,7 +125,7 @@ if __name__ == '__main__':
                 input_signal_frequency=f_AWG,
                 trigger_channel=1,
                 data_channel=3,
-                debug=True
+                debug=False
             )
 
             resample_waveform = ResampleMeasuredWaveform(
@@ -139,7 +142,17 @@ if __name__ == '__main__':
                 baseband_fft_length=mod_ofdm.baseband_fft_length,
                 cyclic_prefix_length=mod_ofdm.cyclic_prefix_length,
                 upsample_factor=upsample_factor,
-                debug=True
+                debug=False
+            )
+
+            append_to_dataset = AppendToDataset(
+                fs_in=mod_ofdm.baseband_sampling_rate,
+                dc_offset=dc_offset_A,
+                f_min=min_freq,
+                f_max=max_freq,
+                active_carrier_indices=mod_ofdm.subcarrier_freqs_hz,
+                modulation_format=modulation_format,
+                dataset_path=dataset_path
             )
 
             send_and_receive_ofdm = SendAndReceiveOFDM(mod_ofdm,
@@ -148,15 +161,22 @@ if __name__ == '__main__':
                                                        resample_waveform,
                                                        demod_ofdm)
             
-            seed = Signal(data=np.zeros(1), sampling_rate=mod_ofdm.fs_out)
-            x = send_and_receive_ofdm.run(seed)
-            Exp.log(f"Shape of received symbol frame: {x.data.shape}, sampling rate: {x.sampling_rate: .2f} Hz")
-            PlotConstellations().run(x)
 
-            # Plot waveform
-            plt.plot(x.data)
-            plt.title(f"Received OFDM Waveform with DC offset of {dc_offset_A - MEASURED_A_OFFSET} A")
-            plt.xlabel("Sample Index")
-            plt.ylabel("Voltage (V)")
-            plt.grid()
-            plt.show()
+
+            # Build dataset
+            for i in range(num_samples_gathered):
+                seed = Signal(data=np.zeros(1), sampling_rate=mod_ofdm.fs_out)
+                x = send_and_receive_ofdm.run(seed)
+                x = append_to_dataset.run(x)
+                # Exp.log(f"Shape of received symbol frame: {x.data.shape}, sampling rate: {x.sampling_rate: .2f} Hz")
+                # PlotConstellations().run(x)
+
+                # # Plot waveform
+                # plt.plot(x.data)
+                # plt.title(f"Received OFDM Waveform with DC offset of {dc_offset_A - MEASURED_A_OFFSET} A")
+                # plt.xlabel("Sample Index")
+                # plt.ylabel("Voltage (V)")
+                # plt.grid()
+                # plt.show()
+
+            # Train channel model
