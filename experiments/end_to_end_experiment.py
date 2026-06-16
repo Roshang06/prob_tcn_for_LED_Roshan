@@ -125,7 +125,7 @@ if __name__ == '__main__':
                 input_signal_frequency=f_AWG,
                 trigger_channel=1,
                 data_channel=3,
-                debug=False
+                debug=True
             )
 
             resample_waveform = ResampleMeasuredWaveform(
@@ -142,7 +142,7 @@ if __name__ == '__main__':
                 baseband_fft_length=mod_ofdm.baseband_fft_length,
                 cyclic_prefix_length=mod_ofdm.cyclic_prefix_length,
                 upsample_factor=upsample_factor,
-                debug=False
+                debug=True
             )
 
             append_to_dataset = AppendToDataset(
@@ -168,15 +168,15 @@ if __name__ == '__main__':
                 seed = Signal(data=np.zeros(1), sampling_rate=mod_ofdm.fs_out)
                 x = send_and_receive_ofdm.run(seed)
                 x = append_to_dataset.run(x)
-                # Exp.log(f"Shape of received symbol frame: {x.data.shape}, sampling rate: {x.sampling_rate: .2f} Hz")
-                # PlotConstellations().run(x)
+                Exp.log(f"Shape of received symbol frame: {x.data.shape}, sampling rate: {x.sampling_rate: .2f} Hz")
+                PlotConstellations().run(x)
 
-                # # Plot waveform
-                # plt.plot(x.data)
-                # plt.title(f"Received OFDM Waveform with DC offset of {dc_offset_A - MEASURED_A_OFFSET} A")
-                # plt.xlabel("Sample Index")
-                # plt.ylabel("Voltage (V)")
-                # plt.grid()
-                # plt.show()
+                # Plot waveform
+                plt.plot(x.data)
+                plt.title(f"Received OFDM Waveform with DC offset of {dc_offset_A - MEASURED_A_OFFSET} A")
+                plt.xlabel("Sample Index")
+                plt.ylabel("Voltage (V)")
+                plt.grid()
+                plt.show()
 
             # Train channel model
