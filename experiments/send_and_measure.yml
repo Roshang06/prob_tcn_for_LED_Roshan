@@ -1,0 +1,7 @@
+HARDWARE_RESOURCES:
+    Agilent_33250A: 
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: Agilent Technologies,33250A,0,1.03-1.01-1.00-03-1
+    Tektronix_TDS2000:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: TEKTRONIX,TBS2074,C020561,CF:91.1CT FV:v1.26.0; FPGA:v1.21;

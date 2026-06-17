@@ -7,7 +7,6 @@ data/**/*.zarr
 debug_logs/*
 *.pyc
 wandb*
-*.yml
 !notebooks/*.ipynb
 notebooks/old*
 models/pickled_models/*
