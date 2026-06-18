@@ -35,6 +35,13 @@ def load_grid(config_path) -> dict:
         return yaml.safe_load(f)
 
 
+def resolve_runtime(full_config: dict, device=None, seed=None):
+    runtime = full_config.get("RUNTIME") or {}
+    device = device if device is not None else runtime.get("DEVICE", "cpu")
+    seed = seed if seed is not None else runtime.get("SEED", 0)
+    return device, int(seed)
+
+
 def expand_grid(model_specs: list) -> list:
     points = []
     for spec in model_specs:

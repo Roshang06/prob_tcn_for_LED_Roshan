@@ -4,15 +4,28 @@ Model adapters + registry for the channel-model grid search.
 Each adapter wraps one model family from modules.models behind a single
 interface so the orchestrator never needs to know how a given model trains
 (TCN = iterative SGD, GMP = closed-form least squares).
-
-Training internals are intentionally left as TODOs; only the structure is here.
 '''
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import torch
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 
 from modules.models import TCN_channel, GeneralizedMemoryPolynomial
+
+
+def gaussian_nll(residual, std):
+    return torch.mean(0.5 * torch.log(2 * torch.pi * std ** 2) + 0.5 * (residual / std) ** 2)
+
+
+def students_t_loss(residual, std, nu):
+    z = residual / std
+    term1 = (-torch.lgamma((nu + 1) / 2) + 0.5 * torch.log(torch.pi * nu)
+             + torch.lgamma(nu / 2) + torch.log(std + 1e-8))
+    term2 = ((nu + 1) / 2) * torch.log(1 + torch.square(z) / nu + 1e-8)
+    return torch.mean(term1 + term2)
 
 
 @runtime_checkable
@@ -22,11 +35,23 @@ class ChannelModel(Protocol):
     @classmethod
     def from_config(cls, params: dict, device: str, shared: dict = None) -> "ChannelModel": ...
 
-    def fit(self, X, Y) -> dict:
-        '''Train and return a history dict (e.g. {"loss": [...]}); {} if closed-form.'''
+    @classmethod
+    def load(cls, params: dict, checkpoint: Path, device: str, shared: dict = None) -> "ChannelModel":
+        '''Rebuild a trained adapter from a checkpoint written by save().'''
+        ...
+
+    def fit(self, X, Y, X_val=None, Y_val=None) -> dict:
+        '''Train and return a history dict (e.g. {"loss": [...], "val_loss": [...]});
+        {} if closed-form. X_val/Y_val are optional held-out validation tensors used
+        to record a per-epoch validation loss for trainable models.'''
         ...
 
     def predict(self, X): ...
+
+    def val_nll(self, X, Y):
+        '''Validation negative log-likelihood for probabilistic models; None for
+        deterministic ones (used to add `val_nll` to the metrics).'''
+        ...
 
     def num_params(self) -> int: ...
 
@@ -51,11 +76,64 @@ class TCNAdapter:
         train_params = {k: params[k] for k in cls.TRAIN_KEYS if k in params}
         return cls(model, train_params, device, shared=shared)
 
-    def fit(self, X, Y) -> dict:
-        # TODO: SGD loop. Build optimizer (see modules.utils.make_optimizer), iterate
-        # epochs over (X, Y), backprop the NLL / rrmse loss, collect per-epoch history.
-        # Grid-level settings are in self.shared, e.g. self.shared["RECEPTIVE_FIELD"].
-        raise NotImplementedError("TCN SGD training loop not implemented yet")
+    @classmethod
+    def load(cls, params: dict, checkpoint: Path, device: str, shared: dict = None) -> "TCNAdapter":
+        adapter = cls.from_config(params, device, shared=shared)
+        adapter.model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=True))
+        adapter.model.eval()
+        return adapter
+
+    def _loss(self, xb, yb):
+        '''The training objective on one batch: Gaussian/Student-t NLL when the
+        model learns noise, plain MSE otherwise.'''
+        if self.model.learn_noise:
+            _, y_pred, y_pred_std, y_pred_nu = self.model(xb)
+            residual = yb - y_pred
+            return (gaussian_nll(residual, y_pred_std) if self.model.gaussian
+                    else students_t_loss(residual, y_pred_std, y_pred_nu))
+        return F.mse_loss(self.model(xb), yb)
+
+    def _val_loss(self, X_val, Y_val) -> float:
+        self.model.eval()
+        with torch.no_grad():
+            loss = self._loss(X_val, Y_val).item()
+        self.model.train()
+        return loss
+
+    def val_nll(self, X, Y):
+        '''Validation negative log-likelihood for probabilistic (learn_noise)
+        models; None otherwise (plain-MSE TCNs have no likelihood).'''
+        if not self.model.learn_noise:
+            return None
+        return self._val_loss(X.to(self.device), Y.to(self.device))
+
+    def fit(self, X, Y, X_val=None, Y_val=None) -> dict:
+        X, Y = X.to(self.device), Y.to(self.device)
+        has_val = X_val is not None
+        if has_val:
+            X_val, Y_val = X_val.to(self.device), Y_val.to(self.device)
+        epochs = self.train_params["epochs"]
+        batch_size = self.train_params["batch_size"]
+        loader = DataLoader(TensorDataset(X, Y), batch_size=batch_size, shuffle=True)
+        optimizer = optim.AdamW(self.model.parameters(), lr=float(self.train_params["lr"]))
+
+        self.model.train()
+        history = {"loss": []}
+        if has_val:
+            history["val_loss"] = []
+        for _ in range(epochs):
+            epoch_loss, n_batches = 0.0, 0
+            for xb, yb in loader:
+                optimizer.zero_grad()
+                loss = self._loss(xb, yb)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+                n_batches += 1
+            history["loss"].append(epoch_loss / n_batches)
+            if has_val:
+                history["val_loss"].append(self._val_loss(X_val, Y_val))
+        return history
 
     def predict(self, X):
         self.model.eval()
@@ -93,9 +171,19 @@ class GMPAdapter:
         fit_params = {k: params[k] for k in cls.FIT_KEYS if k in params}
         return cls(model, fit_params, device, shared=shared)
 
-    def fit(self, X, Y) -> dict:
+    @classmethod
+    def load(cls, params: dict, checkpoint: Path, device: str, shared: dict = None) -> "GMPAdapter":
+        adapter = cls.from_config(params, device, shared=shared)
+        ckpt = torch.load(checkpoint, map_location=device, weights_only=True)
+        adapter.model.weights = ckpt["weights"]
+        return adapter
+
+    def fit(self, X, Y, X_val=None, Y_val=None) -> dict:
         self.model.fit(X, Y, **self.fit_params)
-        return {}  # closed-form: no per-epoch history
+        return {}  # closed-form: no per-epoch history (val loss measured by orchestrator)
+
+    def val_nll(self, X, Y):
+        return None  # deterministic least-squares fit, no likelihood
 
     def predict(self, X):
         return self.model.predict(X)
@@ -120,14 +208,24 @@ class MockAdapter:
     def from_config(cls, params: dict, device: str, shared: dict = None) -> "MockAdapter":
         return cls(params, shared=shared)
 
-    def fit(self, X, Y) -> dict:
-        return {"loss": [1.0, 0.5, 0.25]}
+    @classmethod
+    def load(cls, params: dict, checkpoint: Path, device: str, shared: dict = None) -> "MockAdapter":
+        return cls(params, shared=shared)
+
+    def fit(self, X, Y, X_val=None, Y_val=None) -> dict:
+        history = {"loss": [1.0, 0.5, 0.25]}
+        if X_val is not None:
+            history["val_loss"] = [1.1, 0.6, 0.35]
+        return history
+
+    def val_nll(self, X, Y):
+        return None
 
     def predict(self, X):
         return X
 
     def num_params(self) -> int:
-        return int(self.params.get("n", 100))
+        return int(self.params["n"])
 
     def save(self, path: Path) -> None:
         Path(path).write_bytes(b"mock-checkpoint")

@@ -150,7 +150,8 @@ if __name__ == '__main__':
                 dc_offset=dc_offset_A,
                 f_min=min_freq,
                 f_max=max_freq,
-                active_carrier_indices=mod_ofdm.subcarrier_freqs_hz,
+                active_carrier_indices=mod_ofdm.subcarrier_indicies,
+                cyclic_prefix_length=mod_ofdm.cyclic_prefix_length,
                 modulation_format=modulation_format,
                 dataset_path=dataset_path
             )

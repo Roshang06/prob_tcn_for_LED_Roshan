@@ -1,3 +1,6 @@
+RUNTIME:
+  DEVICE: cpu
+  SEED: 0
 HARDWARE_RESOURCES:
     Agilent_33250A: 
         DRIVER_PATH: pyflux.hardware.drivers
@@ -25,6 +28,10 @@ DATA_COLLECTION:
 
 CHANNEL_GRID_SEARCH:
   RECEPTIVE_FIELD: 20
+  VAL_FRACTION: 0.2
+  # SELECTED_RUN_IDS:        # optional: pin exactly which channel runs advance to the
+  #   - tcn_1a2b3c4d         # encoder/decoder stage. When set, overrides best-per-family
+  #   - gmp_5e6f7a8b         # selection. Comment out to auto-select by validation loss.
   models:
     - model: gmp
       params:
@@ -43,15 +50,15 @@ CHANNEL_GRID_SEARCH:
         epochs: 200
         lr: 1.0e-3
 
-
 ENCODER_DECODER:
-  ARCHITECTURE: ["TCN"]
-  N_LAYERS: 2
-  CHANNEL_SIZES: [1, 4, 4, 1]
-  KERNEL_SIZES: [3, 3]
-  STRIDES: [1, 1]
-  DILATION_BASE: 2
-  TRAINING_EPOCHS: 100
-  BATCH_SIZE: 16
-  LEARNING_RATE: 1e-3
-  WEIGHT_DECAY: 1e-5
+  CONSTELLATION: qpsk
+  PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to
+  params:
+    nlayers: [2, 3]
+    dilation_base: 2
+    num_taps: 5
+    hidden_channels: 8
+    epochs: 100
+    lr: 1.0e-3
+    weight_decay: 1.0e-5    # AdamW L2 regularization; 0 disables. List -> swept.
+    batch_size: 16

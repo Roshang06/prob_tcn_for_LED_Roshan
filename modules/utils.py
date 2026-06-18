@@ -4,7 +4,6 @@ import zarr
 import numpy as np
 from dataclasses import dataclass
 from torch.utils.data import Dataset
-from typing import Optional
 import matplotlib.pyplot as plt
 import wandb
 import torch.optim as optim
@@ -12,26 +11,44 @@ import torch.nn.functional as F
 import sys
 import time
 import json
+import warnings
 from modules.models import TCN_channel, TCN
 
 @dataclass
-class OFDM_channel:
-    FREQUENCIES: Optional[torch.Tensor] = None
-    NUM_POINTS_SYMBOL: Optional[int] = None
-    CP_LENGTH: Optional[int] = None
-    DELTA_K: Optional[int] = None
-    KS: Optional[torch.Tensor] = None
-    K_MIN: Optional[int] = None
-    K_MAX: Optional[int] = None
-    LEFT_PADDING_ZEROS: Optional[int] = None
-    CP_RATIO: Optional[float] = None
-    NUM_POINTS_FRAME: Optional[int] = None
-    NUM_POS_FREQS: Optional[int] = None
-    RIGHT_PADDING_ZEROS: Optional[int] = None
-    sent_frames_freq: Optional[torch.Tensor] = None
-    received_frames_freq: Optional[torch.Tensor] = None
-    sent_frames_time: Optional[torch.Tensor] = None
-    received_frames_time: Optional[torch.Tensor] = None
+class OFDMConfig:
+    '''OFDM frame geometry, named to match the PyFlux ModulateDataOFDM block.'''
+    subcarrier_spacing: float
+    baseband_fft_length: int
+    cyclic_prefix_length: int
+    active_carrier_indices: torch.Tensor
+    subcarrier_freqs_hz: torch.Tensor
+    num_leading_zeros: int
+    num_trailing_zeros: int
+
+    @property
+    def baseband_ofdm_symbol_length(self) -> int:
+        return self.baseband_fft_length + self.cyclic_prefix_length
+
+    @classmethod
+    def from_modulator(cls, mod) -> "OFDMConfig":
+        '''Build directly from a live ModulateDataOFDM block.'''
+        indices = torch.as_tensor(mod.subcarrier_indicies, dtype=torch.int)
+        num_leading = len(mod.leading_zero_subcarriers)
+        num_trailing = mod.baseband_fft_length // 2 - 1 - num_leading - mod.num_carriers
+        return cls(
+            subcarrier_spacing=mod.baseband_sampling_rate / mod.baseband_fft_length,
+            baseband_fft_length=mod.baseband_fft_length,
+            cyclic_prefix_length=mod.cyclic_prefix_length,
+            active_carrier_indices=indices,
+            subcarrier_freqs_hz=torch.as_tensor(mod.subcarrier_freqs_hz, dtype=torch.float32),
+            num_leading_zeros=num_leading,
+            num_trailing_zeros=num_trailing,
+        )
+
+    def to(self, device) -> "OFDMConfig":
+        self.active_carrier_indices = self.active_carrier_indices.to(device)
+        self.subcarrier_freqs_hz = self.subcarrier_freqs_hz.to(device)
+        return self
 
 def symbols_to_time(X,
                     num_left_padding_zeros: int,
@@ -56,96 +73,37 @@ def symbols_to_time(X,
 
 def calculate_rrmse_pct_loss(y, y_pred):
     r = y - y_pred
-    x = torch.mean(r ** 2) / torch.mean(y ** 2)
+    x = torch.mean(torch.abs(r) ** 2) / torch.mean(torch.abs(y) ** 2)
     return (torch.sqrt(x) * 100).item()
 
-def extract_zarr_data(file_path, device, delay=None, ofdm_info=None):
-    '''
-    Extracts OFDM data from zarr file and returns an OFDM_channel object
+def load_ofdm_dataset(file_path, device):
+    '''Read an AppendToDataset zarr group into (sent, received, OFDMConfig).
 
-    :param file_path: path to zarr file
-    :param device: torch.device to load data onto
-    :param delay: if provided, applies this delay to the received signal
-    :param ofdm_info: if provided, uses this OFDM_channel object instead of creating a new one
-    '''
-    o_sets = OFDM_channel()
-    cache_path = file_path.replace(".zarr", "_cached.pt").replace(".h5", "_cached.pt")
-    if os.path.exists(cache_path):
-        data = torch.load(cache_path, map_location=device)
-        o_sets.sent_frames_time = data["sent_frames_time"].to(device)
-        o_sets.received_frames_time = data["received_frames_time"].to(device)
-        o_sets.FREQUENCIES = data["frequencies"].to(device)
-        o_sets.NUM_POINTS_SYMBOL = data["NUM_POINTS_SYMBOL"]
-        o_sets.CP_LENGTH = data["CP_LENGTH"]
-        o_sets.DELTA_K = o_sets.FREQUENCIES[1] - o_sets.FREQUENCIES[0]
-        o_sets.KS = (o_sets.FREQUENCIES / o_sets.DELTA_K).to(torch.int)
-        o_sets.K_MIN = o_sets.KS[0]
-        o_sets.K_MAX = o_sets.KS[-1]
-        o_sets.LEFT_PADDING_ZEROS = o_sets.K_MIN - 1 # don't include DC freq
-        o_sets.NUM_POS_FREQS = o_sets.K_MAX + 1
-        o_sets.NUM_POINTS_FRAME = o_sets.NUM_POINTS_SYMBOL - o_sets.CP_LENGTH
-        o_sets.RIGHT_PADDING_ZEROS = (o_sets.NUM_POINTS_FRAME  - 2 * o_sets.NUM_POS_FREQS) // 2
-        print("Loaded from cache!")
+    sent/received are the CP-removed baseband frames written by AppendToDataset,
+    so both have length baseband_fft_length. Geometry is recovered from the group
+    attrs (active_carrier_indices, f_min_hz, cyclic_prefix_length) plus the array
+    width.'''
+    root = zarr.open_group(file_path, mode="r")
+    sent = torch.tensor(root["sent_baseband"][:], dtype=torch.float32, device=device)
+    received = torch.tensor(root["received_baseband"][:], dtype=torch.float32, device=device)
 
-    else:
-        print("No cache found — loading original dataset...")
-        root = zarr.open(file_path, mode="r")
-        sent, received, received_time = [], [], []
+    indices = torch.tensor(root.attrs["active_carrier_indices"], dtype=torch.int)
+    fft_length = sent.shape[1]
+    num_carriers = len(indices)
+    num_leading = int(indices[0]) - 1  # leading zero subcarriers, DC excluded
+    num_trailing = fft_length // 2 - 1 - num_leading - num_carriers
+    spacing = root.attrs["f_min_hz"] / int(indices[0])
 
-        # Loop through frames
-        num_skipped = 0
-        for frame_key in sorted(root.group_keys()):
-            try:
-                frame = root[frame_key]
-                if o_sets.FREQUENCIES is None:
-                    o_sets.FREQUENCIES = torch.tensor(frame["freqs"][:], dtype=torch.int).real
-                    o_sets.NUM_POINTS_SYMBOL = int(frame.attrs["num_points_symbol"])
-                    o_sets.CP_LENGTH = int(frame.attrs["cp_length"])
-                else:
-                    pass
-
-                sent.append(torch.tensor(frame["sent"][:], dtype=torch.complex64))
-                received.append(torch.tensor(frame["received"][:], dtype=torch.complex64))
-                if "received_time" in frame:
-                    received_time.append(torch.tensor(frame["received_time"][:], dtype=torch.float32))
-            except:
-                num_skipped += 1
-                pass # skip corrupted frames
-        print(f"Skipped {num_skipped} corrupted frames")
-
-        o_sets.sent_frames_freq = torch.stack(sent).squeeze(1)
-        o_sets.received_frames_freq = torch.stack(received).squeeze(1)
-        o_sets.DELTA_K = o_sets.FREQUENCIES[1] - o_sets.FREQUENCIES[0]
-        o_sets.KS = (o_sets.FREQUENCIES / o_sets.DELTA_K).to(torch.int)
-        o_sets.K_MIN = o_sets.KS[0]
-        o_sets.K_MAX = o_sets.KS[-1]
-        o_sets.LEFT_PADDING_ZEROS = o_sets.K_MIN - 1 # don't include DC freq
-        o_sets.NUM_POS_FREQS = o_sets.K_MAX + 1
-        o_sets.NUM_POINTS_FRAME = o_sets.NUM_POINTS_SYMBOL - o_sets.CP_LENGTH
-        o_sets.RIGHT_PADDING_ZEROS = (o_sets.NUM_POINTS_FRAME  - 2 * o_sets.NUM_POS_FREQS) // 2
-
-        # Handle received time symbols; perform some cleaning if necessary
-        N_shortest = min(t.size(-1) for t in received_time)
-        good_indices = [i for i, x in enumerate(received_time) if x.size(-1) == N_shortest]
-        received_frames_time = torch.stack([t for t in received_time if t.size(-1) == N_shortest],dim=0).real
-        sent_frames_freq = o_sets.sent_frames_freq[good_indices]
-        o_sets.received_frames_time = received_frames_time.squeeze(1)
-        sent_frames_time = symbols_to_time(sent_frames_freq,
-                                           o_sets.LEFT_PADDING_ZEROS,
-                                           o_sets.RIGHT_PADDING_ZEROS)
-        sent_frames_time = torch.hstack((sent_frames_time[:, -o_sets.CP_LENGTH:], sent_frames_time))
-        o_sets.sent_frames_time = sent_frames_time
-
-        cache_path = file_path.replace(".zarr", "_cached.pt").replace(".h5", "_cached.pt")
-        torch.save({
-            "sent_frames_time": o_sets.sent_frames_time.cpu(),
-            "received_frames_time": o_sets.received_frames_time.cpu(),
-            "frequencies": o_sets.FREQUENCIES.cpu(),
-            "NUM_POINTS_SYMBOL": o_sets.NUM_POINTS_SYMBOL,
-            "CP_LENGTH": o_sets.CP_LENGTH
-        }, cache_path)
-
-    return o_sets
+    config = OFDMConfig(
+        subcarrier_spacing=spacing,
+        baseband_fft_length=fft_length,
+        cyclic_prefix_length=int(root.attrs["cyclic_prefix_length"]),
+        active_carrier_indices=indices.to(device),
+        subcarrier_freqs_hz=(indices.to(torch.float32) * spacing).to(device),
+        num_leading_zeros=num_leading,
+        num_trailing_zeros=num_trailing,
+    )
+    return sent, received, config
 
 class ChannelData(Dataset):
     def __init__(self,
@@ -171,10 +129,10 @@ def log_snr_plots(y_preds, noisy_y_preds, ofdm_settings):
     this logs signal and noise power plots
     '''
     noise_pred = noisy_y_preds - y_preds
-    noise_power_pred_k = torch.fft.fft(noise_pred[:, ofdm_settings.CP_LENGTH:], norm='ortho', dim=-1).abs().square().mean(dim=0)
-    signal_power_model = torch.fft.fft(y_preds[:, ofdm_settings.CP_LENGTH:], norm='ortho', dim=-1).abs().square().mean(dim=0)
+    noise_power_pred_k = torch.fft.fft(noise_pred[:, ofdm_settings.cyclic_prefix_length:], norm='ortho', dim=-1).abs().square().mean(dim=0)
+    signal_power_model = torch.fft.fft(y_preds[:, ofdm_settings.cyclic_prefix_length:], norm='ortho', dim=-1).abs().square().mean(dim=0)
     snr_k_model = (signal_power_model / (noise_power_pred_k + 1e-8))
-    sample_rate = ofdm_settings.DELTA_K * ofdm_settings.NUM_POINTS_FRAME
+    sample_rate = ofdm_settings.subcarrier_spacing * ofdm_settings.baseband_fft_length
     snr_mag_model = 10 * torch.log10(torch.abs(snr_k_model) + 1e-8)
     freqs = torch.fft.fftfreq(len(snr_mag_model), d=1/sample_rate)
     half = len(freqs)//2
@@ -297,9 +255,10 @@ def in_band_time_loss(sent_time, decoded_time, ks_indices, n_fft, num_taps):
     impulse_response = torch.fft.ifftshift(torch.fft.ifft(mask).real)
     h = impulse_response.view(1, 1, -1)
 
-    # Filter both signals
-    sent_filtered = F.conv1d(sent_time.unsqueeze(1), h, padding='same').squeeze(1)
-    decoded_filtered = F.conv1d(decoded_time.unsqueeze(1), h, padding='same').squeeze(1)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*padding='same' with even kernel.*")
+        sent_filtered = F.conv1d(sent_time.unsqueeze(1), h, padding='same').squeeze(1)
+        decoded_filtered = F.conv1d(decoded_time.unsqueeze(1), h, padding='same').squeeze(1)
 
     # Compute MSE on filtered signals (equivalent to in-band frequency loss)
     loss = torch.mean((sent_filtered[:, num_taps:] - decoded_filtered[:, num_taps:]).pow(2))
@@ -324,7 +283,8 @@ def calculate_BER(received_symbols, true_bits, constellation, return_decided_bit
     # Flatten decided bits into a 1D array
     decided_bits_flat = [int(bit) for symbol_bits in decided_bits for bit in symbol_bits]
 
-    # Convert to NumPy arrays for comparison
+    if torch.is_tensor(true_bits):
+        true_bits = true_bits.detach().cpu()
     true_bits_array = np.array(true_bits)
     decided_bits_flat_array = np.array(decided_bits_flat)
 

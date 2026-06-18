@@ -49,6 +49,7 @@ class ModulateDataOFDM(FunctionalBlock):
         self.AWG_TABLE_LENGTH = 16_384
         self.output_length = int(self.AWG_TABLE_LENGTH * awg_table_fraction)
         self.subcarrier_freqs_hz = np.arange(f_min, f_max, subcarrier_spacing)
+        self.subcarrier_indicies = np.round(self.subcarrier_freqs_hz / subcarrier_spacing).astype(int)
         self.num_carriers = len(self.subcarrier_freqs_hz)
         self.bits_per_symbol = constellation.bits_per_symbol
         self.constellation = constellation
@@ -216,7 +217,6 @@ class DemodulateDataOFDM(FunctionalBlock):
         self.ofdm_symbol_length_with_cp = baseband_fft_length + cyclic_prefix_length
         self.cyclic_prefix_length = cyclic_prefix_length
         self.upsample_factor = upsample_factor
-        self.subcarrier_freqs_hz = np.arange(f_min, f_max, subcarrier_spacing)
         self.subcarrier_indicies = np.round(self.subcarrier_freqs_hz / subcarrier_spacing).astype(int)
         self.debug = debug
 
@@ -299,6 +299,7 @@ class AppendToDataset(ActionBlock):
                  f_min: float,
                  f_max: float,
                  active_carrier_indices,
+                 cyclic_prefix_length: int,
                  modulation_format: str,
                  block_size: int = 64,
                  dataset_path: Path = None):
@@ -324,6 +325,7 @@ class AppendToDataset(ActionBlock):
             "f_min_hz": float(f_min),
             "f_max_hz": float(f_max),
             "active_carrier_indices": np.asarray(active_carrier_indices).astype(int).tolist(),
+            "cyclic_prefix_length": int(cyclic_prefix_length),
             "modulation_format": str(modulation_format),
         })
         print(f"[AppendToDataset] created new dataset: {self.dataset_path}")

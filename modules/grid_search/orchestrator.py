@@ -8,185 +8,168 @@ Layout produced under data/experiments/<name>_<timestamp>/:
     runs.jsonl               one line per finished run (the "run table")
     runs/<run_id>/
         config.yaml          this run's resolved params
-        model.pt             checkpoint (adapter.save)
-        metrics.json         eval metrics + num_params + train_seconds
-        history.csv          per-epoch loss (omitted for closed-form models)
-        plots/
+        model.pt              checkpoint (adapter.save)
+        metrics.json          eval metrics (rrmse_pct + val_rrmse_pct) + num_params + train_seconds
+        history.csv          per-epoch train/val loss (omitted for closed-form models)
+        plots/loss.png       train vs validation loss curve (trainable models only)
     summary/leaderboard.csv  aggregated view of runs.jsonl
 
 run_id is a deterministic hash of the point, so a finished run (metrics.json
-present) is skipped on re-run -> crash-resumable for free.
+present) is skipped on re-run -> crash-resumable for free. See base.py for the
+shared run-folder bookkeeping reused by EncoderDecoderGridSearch.
 
-Training/eval internals (_load_data, _evaluate) are TODO stubs.
+VAL_FRACTION (grid-wide) holds out a random slice of frames for validation;
+channel models are then selected on val_rrmse_pct (see select_channel_models).
+SELECTED_RUN_IDS can pin exactly which runs advance to the encoder/decoder stage.
 '''
-import csv
-import hashlib
 import json
-import random
-import socket
-import subprocess
-import time
-from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import torch
 import yaml
 
 from modules.grid_search.adapters import MODEL_REGISTRY
-from modules.grid_search.grid import expand_grid
-
-_REPO_DIR = Path(__file__).resolve().parents[2]
-
-
-def _git_hash():
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=_REPO_DIR, stderr=subprocess.DEVNULL
-        ).decode().strip()
-    except Exception:
-        return None
+from modules.grid_search.base import GridSearchBase
+from modules.grid_search.grid import expand_grid, resolve_runtime
+from modules.utils import calculate_rrmse_pct_loss, load_ofdm_dataset
 
 
-def _run_id(point: dict) -> str:
-    digest = hashlib.md5(json.dumps(point, sort_keys=True).encode()).hexdigest()[:8]
-    return f"{point['model']}_{digest}"
+class ChannelModelGridSearch(GridSearchBase):
+    # keys consumed by the orchestrator itself, not forwarded to adapters as shared
+    _ORCHESTRATOR_KEYS = ("models", "VAL_FRACTION", "SELECTED_RUN_IDS")
 
+    def __init__(self,
+                 grid_config: dict,
+                 dataset_path,
+                 experiments_dir=None,
+                 device="cpu",
+                 seed=0,
+                 experiment_name="channel_models",
+                 val_fraction=None
+                 ):
 
-class ChannelModelGridSearch:
-    def __init__(self, grid_config: dict, dataset_path, experiments_dir=None,
-                 device="cpu", seed=0, experiment_name="channel_models"):
-        self.grid_config = dict(grid_config)
         self.dataset_path = Path(dataset_path)
-        self.device = device
-        self.seed = seed
-        self.points = expand_grid(self.grid_config["models"])
-        # every CHANNEL_GRID_SEARCH key except `models` is a grid-wide setting
-        # (e.g. RECEPTIVE_FIELD) handed to every adapter via from_config(shared=...)
-        self.shared_params = {k: v for k, v in self.grid_config.items() if k != "models"}
+        self.val_fraction = float(grid_config.get("VAL_FRACTION", val_fraction or 0.0))
 
-        base = Path(experiments_dir) if experiments_dir else _REPO_DIR / "data" / "experiments"
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        self.exp_dir = base / f"{experiment_name}_{timestamp}"
-        self.runs_dir = self.exp_dir / "runs"
-        self.summary_dir = self.exp_dir / "summary"
-        self.runs_jsonl = self.exp_dir / "runs.jsonl"
+        points = expand_grid(grid_config["models"])
+        # every CHANNEL_GRID_SEARCH key except orchestrator settings is a grid-wide
+        # setting (e.g. RECEPTIVE_FIELD) handed to every adapter via from_config(shared=...)
+        shared_params = {k: v for k, v in grid_config.items() if k not in self._ORCHESTRATOR_KEYS}
+        super().__init__(points, grid_config, shared_params, experiments_dir, device, seed,
+                          experiment_name, extra_manifest={
+                              "dataset_path": str(self.dataset_path),
+                              "val_fraction": self.val_fraction,
+                          })
 
     @classmethod
-    def from_experiment_config(cls, config_path, device="cpu", seed=0,
-                               experiment_name="channel_models", experiments_dir=None):
-        '''Build the grid search from the unified end-to-end config: the grid spec
-        comes from the CHANNEL_GRID_SEARCH section and the dataset from
-        DATA_COLLECTION.DATASET_PATH.'''
+    def from_experiment_config(cls, 
+                               config_path,
+                               device=None,
+                               seed=None,
+                               experiment_name="channel_models",
+                               experiments_dir=None
+                               ):
+        '''Build the grid search from the unified end-to-end config'''
+    
         with open(Path(config_path)) as f:
             full = yaml.safe_load(f)
+    
         grid_config = full["CHANNEL_GRID_SEARCH"]
         dataset_path = full["DATA_COLLECTION"]["DATASET_PATH"]
+        device, seed = resolve_runtime(full, device, seed)
+        
         return cls(grid_config, dataset_path=dataset_path, device=device, seed=seed,
                    experiment_name=experiment_name, experiments_dir=experiments_dir)
 
-    # ------------------------------------------------------------------ setup
-    def setup(self):
-        self.runs_dir.mkdir(parents=True, exist_ok=True)
-        self.summary_dir.mkdir(parents=True, exist_ok=True)
-        manifest = {
-            "experiment_dir": str(self.exp_dir),
-            "dataset_path": str(self.dataset_path),
-            "git_hash": _git_hash(),
-            "seed": self.seed,
-            "device": self.device,
-            "host": socket.gethostname(),
-            "created": datetime.now().isoformat(timespec="seconds"),
-            "n_points": len(self.points),
-            "grid": self.grid_config,
-        }
-        with open(self.exp_dir / "experiment_config.yaml", "w") as f:
-            yaml.safe_dump(manifest, f, sort_keys=False)
-        print(f"[grid] experiment dir: {self.exp_dir}  ({len(self.points)} points)")
-        return self
+    # ------------------------------------------------------------- data/eval
+    def _prepare(self, data=None):
+        '''data: optional (X, Y) tuple; if None, loaded from self.dataset_path.
+        Returns (X_train, Y_train, X_val, Y_val); the val tensors are None when
+        VAL_FRACTION is 0.'''
+        if data is not None:
+            sent, received = data
+        else:
+            sent, received, _ = load_ofdm_dataset(str(self.dataset_path), self.device)
+        return self._split_train_val(sent, received)
 
-    # ------------------------------------------------------------- TODO hooks
-    def _load_data(self):
-        # TODO: load X (sent_baseband) and Y (received_baseband) tensors from the
-        # zarr dataset at self.dataset_path. See modules.utils.extract_zarr_data.
-        # Return (X, Y) on self.device (later: split into train/val).
-        raise NotImplementedError("dataset loading not wired yet")
+    def _split_train_val(self, X, Y):
+        n = X.shape[0]
+        n_val = int(round(n * self.val_fraction))
+        if n_val == 0:
+            return X, Y, None, None
+        # deterministic shuffle so the same seed reproduces the same split
+        perm = torch.randperm(n, generator=torch.Generator().manual_seed(self.seed))
+        val_idx, train_idx = perm[:n_val], perm[n_val:]
+        return X[train_idx], Y[train_idx], X[val_idx], Y[val_idx]
 
     def _evaluate(self, adapter, X, Y) -> dict:
-        # TODO: compute validation metrics, e.g.
-        #   rrmse = modules.utils.calculate_rrmse_pct_loss(Y, adapter.predict(X))
-        return {"rrmse_pct": None, "nmse_db": None}
+        y_pred = adapter.predict(X)
+        if isinstance(y_pred, tuple):  # TCN learn_noise: (noisy, mean, std, nu)
+            y_pred = y_pred[1]
+        return {"rrmse_pct": calculate_rrmse_pct_loss(Y.to(y_pred.device), y_pred)}
 
-    # ----------------------------------------------------------------- helpers
-    def _seed_everything(self):
-        random.seed(self.seed)
-        np.random.seed(self.seed)
-        torch.manual_seed(self.seed)
+    # ----------------------------------------------------------------- run
+    def _run_point(self, point, run_dir, context) -> dict:
+        X, Y, X_val, Y_val = context
+        adapter = MODEL_REGISTRY[point["model"]].from_config(
+            point["params"], self.device, shared=self.shared_params)
 
-    def _write_history(self, run_dir: Path, history: dict):
-        if not history:
-            return
-        n = len(next(iter(history.values())))
-        with open(run_dir / "history.csv", "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["epoch", *history.keys()])
-            for i in range(n):
-                w.writerow([i, *(history[k][i] for k in history)])
+        history = adapter.fit(X, Y, X_val, Y_val)
+        metrics = self._evaluate(adapter, X, Y)
+        if X_val is not None:
+            # selection metric: held-out validation rRMSE (see select_channel_models)
+            metrics["val_rrmse_pct"] = self._evaluate(adapter, X_val, Y_val)["rrmse_pct"]
+            # probabilistic (learn_noise) models also report validation NLL
+            val_nll = adapter.val_nll(X_val, Y_val)
+            if val_nll is not None:
+                metrics["val_nll"] = val_nll
+        metrics["num_params"] = int(adapter.num_params())
 
-    def _append_run_record(self, run_id, point, metrics):
-        record = {"run_id": run_id, "model": point["model"], **point["params"], **metrics}
-        with open(self.runs_jsonl, "a") as f:
-            f.write(json.dumps(record) + "\n")
+        adapter.save(run_dir / "model.pt")
+        self._write_history(run_dir, history)
+        return metrics
 
-    def _write_leaderboard(self):
-        if not self.runs_jsonl.exists():
-            return
-        rows = [json.loads(line) for line in self.runs_jsonl.read_text().splitlines() if line.strip()]
-        if not rows:
-            return
-        cols = list(dict.fromkeys(k for r in rows for k in r))  # union, order-preserving
-        with open(self.summary_dir / "leaderboard.csv", "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=cols)
-            w.writeheader()
-            w.writerows(rows)
 
-    # --------------------------------------------------------------------- run
-    def run(self, data=None):
-        '''data: optional (X, Y) tuple; if None, self._load_data() is called.'''
-        self.setup()
-        if data is None:
-            data = self._load_data()
-        X, Y = data
+def select_channel_models(exp_dir, mode="best", metric="val_rrmse_pct", run_ids=None):
+    '''Pick channel models out of a finished ChannelModelGridSearch run for the
+    encoder/decoder stage.
 
-        for i, point in enumerate(self.points):
-            run_id = _run_id(point)
-            run_dir = self.runs_dir / run_id
-            metrics_path = run_dir / "metrics.json"
-            if metrics_path.exists():
-                print(f"[grid] ({i + 1}/{len(self.points)}) skip {run_id} (done)")
-                continue
+    run_ids: optional explicit list of run_ids to forward (config-level override);
+        when given, exactly those runs are returned and `mode` is ignored.
+    mode="best": the lowest-`metric` run per model family (default metric is the
+        held-out validation rRMSE, falling back to train rRMSE when no validation
+        split was used). mode="all": every finished run.'''
+    exp_dir = Path(exp_dir)
+    rows = [json.loads(line) for line in (exp_dir / "runs.jsonl").read_text().splitlines() if line.strip()]
 
-            (run_dir / "plots").mkdir(parents=True, exist_ok=True)
-            with open(run_dir / "config.yaml", "w") as f:
-                yaml.safe_dump({**point, "shared": self.shared_params}, f, sort_keys=False)
+    def score(row):
+        return row.get(metric, row.get("rrmse_pct"))
 
-            self._seed_everything()
-            adapter = MODEL_REGISTRY[point["model"]].from_config(
-                point["params"], self.device, shared=self.shared_params)
+    if run_ids:
+        by_id = {row["run_id"]: row for row in rows}
+        missing = [rid for rid in run_ids if rid not in by_id]
+        if missing:
+            raise ValueError(f"run_ids not found in {exp_dir}: {missing}")
+        rows = [by_id[rid] for rid in run_ids]
+    elif mode == "best":
+        best = {}
+        for row in rows:
+            cur = best.get(row["model"])
+            if cur is None or score(row) < score(cur):
+                best[row["model"]] = row
+        rows = list(best.values())
+    elif mode != "all":
+        raise ValueError(f"unknown mode {mode!r}, expected 'all' or 'best'")
 
-            t0 = time.time()
-            history = adapter.fit(X, Y)
-            train_seconds = round(time.time() - t0, 3)
-
-            metrics = self._evaluate(adapter, X, Y)
-            metrics.update(num_params=int(adapter.num_params()), train_seconds=train_seconds)
-
-            adapter.save(run_dir / "model.pt")
-            self._write_history(run_dir, history)
-            with open(metrics_path, "w") as f:
-                json.dump(metrics, f, indent=2)
-            self._append_run_record(run_id, point, metrics)
-            print(f"[grid] ({i + 1}/{len(self.points)}) done {run_id}  params={metrics['num_params']}")
-
-        self._write_leaderboard()
-        return self.exp_dir
+    selected = []
+    for row in rows:
+        run_dir = exp_dir / "runs" / row["run_id"]
+        with open(run_dir / "config.yaml") as f:
+            params = yaml.safe_load(f)["params"]
+        selected.append({
+            "run_id": row["run_id"],
+            "model": row["model"],
+            "params": params,
+            "checkpoint": run_dir / "model.pt",
+        })
+    return selected

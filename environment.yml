@@ -7,10 +7,9 @@ channels:
 dependencies:
   - pip>=23
   - python=3.11
-  - numpy>=1.26
+  - numpy>=1.26,<2
   - matplotlib>=3.8
   - pandas>=2.0
-  - pytorch>=2.2.1
   - scikit-learn
   - zarr
   - pyyaml
@@ -21,7 +20,7 @@ dependencies:
   - pyserial
   - ipykernel
   - pip:
-      - torch
-      - torchaudio
+      - torch==2.4.1
+      - torchaudio==2.4.1
       - pyvisa
       - pyflux @ git+https://github.com/UW-Photonics-Lab/PyFlux.git@prototype/v1
