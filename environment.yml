@@ -1,6 +1,8 @@
 # Rerun after changes: conda env update --file environment.yml --prune
 
 name: prob_tcn_for_LED
+variables:
+  KMP_DUPLICATE_LIB_OK: "TRUE"
 channels:
   - conda-forge
   - defaults
