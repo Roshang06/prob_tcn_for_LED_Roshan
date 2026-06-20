@@ -15,11 +15,12 @@ import yaml
 from matplotlib.figure import Figure
 
 from modules.constellation_diagram import get_constellation
+from modules.experimental_blocks import band_limited_zc_preamble
 from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
 from modules.models import TCN
-from modules.utils import (calculate_BER, calculate_rrmse_pct_loss, in_band_time_loss,
+from modules.utils import (calculate_BER, evm_loss, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time)
 
 ARCH_KEYS = ("nlayers", "dilation_base", "num_taps", "hidden_channels")
@@ -34,13 +35,17 @@ class EncoderDecoderGridSearch(GridSearchBase):
                  experiments_dir=None,
                  device="cpu",
                  seed=0,
-                 experiment_name="encoder_decoder"
+                 experiment_name="encoder_decoder",
+                 preamble_length=256
                  ):
-    
+
         self.dataset_path = Path(dataset_path)
         self.channel_models = {cm["run_id"]: cm for cm in channel_models}
         self.constellation = get_constellation(grid_config["constellation"])
         self.preamble_amplitude = float(grid_config["preamble_amplitude"])
+        self.preamble_length = preamble_length
+        # preamble is always in the burst; this only controls whether it's penalized
+        self.preamble_in_loss = bool(grid_config.get("preamble_in_loss", True))
 
         ed_points = expand_grid([{"model": "tcn_ae", "params": grid_config["params"]}])
         points = [{**p, "channel_run_id": run_id} for p in ed_points for run_id in self.channel_models]
@@ -50,6 +55,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
                               "dataset_path": str(self.dataset_path),
                               "channel_models": list(self.channel_models),
                           })
+        self.rank_by = "evm"  # in-band EVM on the active-carrier (sent vs decoded) symbols
 
     @classmethod
     def from_experiment_config(cls,
@@ -72,11 +78,19 @@ class EncoderDecoderGridSearch(GridSearchBase):
         device, seed = resolve_runtime(full, device, seed)
         return cls(grid_config, channel_models=channel_models, dataset_path=dataset_path,
                    device=device, seed=seed, experiment_name=experiment_name,
-                   experiments_dir=experiments_dir)
+                   experiments_dir=experiments_dir,
+                   preamble_length=int(full["DATA_COLLECTION"]["PREAMBLE_LENGTH"]))
 
     def _prepare(self, ofdm_config=None):
         if ofdm_config is None:
             _, _, ofdm_config = load_ofdm_dataset(str(self.dataset_path), self.device)
+        # band-limited ZC preamble (identical to ModulateDataOFDM) prepended to every
+        # training burst so the encoder/decoder learn to preserve it for hardware sync
+        fs = ofdm_config.baseband_fft_length * ofdm_config.subcarrier_spacing
+        freqs = ofdm_config.subcarrier_freqs_hz
+        preamble = band_limited_zc_preamble(self.preamble_length, fs,
+                                            float(freqs.min()), float(freqs.max()), self.preamble_amplitude)
+        self.preamble = torch.tensor(preamble, dtype=torch.float32, device=self.device).unsqueeze(0)
         loaded = {}
         for run_id, cm in self.channel_models.items():
             model = MODEL_REGISTRY[cm["model"]].load(cm["params"], cm["checkpoint"], self.device).model
@@ -91,6 +105,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         true_frame = torch.tensor(np.stack(symbols), dtype=torch.complex64, device=self.device)
         sent_time = symbols_to_time(true_frame, ofdm_config.num_leading_zeros, ofdm_config.num_trailing_zeros)
         sent_time = torch.hstack((sent_time[:, -ofdm_config.cyclic_prefix_length:], sent_time))
+        sent_time = torch.hstack((self.preamble.expand(batch_size, -1), sent_time))  # [preamble | CP | symbol]
         return torch.tensor(true_bits, device=self.device), sent_time
 
     def _forward(self, encoder, decoder, channel_model, sent_time):
@@ -101,11 +116,12 @@ class EncoderDecoderGridSearch(GridSearchBase):
 
     def _frame_to_freq(self, time_frame, ofdm_config):
         '''
-        CP-strip + FFT a (batch, frame) time signal down to the symbols carried
+        Strip the preamble + CP, then FFT the OFDM symbol down to the symbols carried
         on the active subcarriers
         '''
-        freq = torch.fft.fft(time_frame[:, ofdm_config.cyclic_prefix_length:], norm="ortho", dim=-1)
-        return freq[:, ofdm_config.active_carrier_indices]
+        start = self.preamble_length + ofdm_config.cyclic_prefix_length
+        symbol = time_frame[:, start:start + ofdm_config.baseband_fft_length]
+        return torch.fft.fft(symbol, norm="ortho", dim=-1)[:, ofdm_config.active_carrier_indices]
 
     def _decode_freq(self, encoder, decoder, channel_model, sent_time, ofdm_config):
         '''
@@ -138,7 +154,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         if was_training:
             encoder.train(); decoder.train()
         ber = calculate_BER(recv_freq.flatten(), true_bits.flatten(), constellation=self.constellation)
-        return {"ber": ber, "rrmse_pct": calculate_rrmse_pct_loss(sent_freq, recv_freq)}
+        return {"ber": ber, "evm": evm_loss(sent_freq, recv_freq).item()}
 
     def _run_point(self, point, run_dir, context) -> dict:
         ofdm_config, channel_models = context
@@ -165,7 +181,10 @@ class EncoderDecoderGridSearch(GridSearchBase):
         for _ in range(p["epochs"]):
             _, sent_time = self._sample_batch(batch_size, num_bits, ofdm_config)
             decoded_time = self._forward(encoder, decoder, channel_model, sent_time)
-            loss = in_band_time_loss(sent_time, decoded_time, ofdm_config.active_carrier_indices, ofdm_config.baseband_fft_length, p["num_taps"])
+            # optionally exclude the preamble region from the loss (decoder still sees it)
+            offset = 0 if self.preamble_in_loss else self.preamble_length
+            loss = in_band_time_loss(sent_time[:, offset:], decoded_time[:, offset:],
+                                     ofdm_config.active_carrier_indices, ofdm_config.baseband_fft_length, p["num_taps"])
 
             optimizer.zero_grad()
             loss.backward()

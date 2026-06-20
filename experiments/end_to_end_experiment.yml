@@ -53,6 +53,7 @@ CHANNEL_GRID_SEARCH:
 ENCODER_DECODER:
   CONSTELLATION: qpsk
   PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to
+  PREAMBLE_IN_LOSS: false     # preamble is always in the burst; penalize it in the loss or not
   params:
     nlayers: [2, 3]
     dilation_base: 2

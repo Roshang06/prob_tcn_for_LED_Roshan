@@ -126,6 +126,9 @@ class GridSearchBase:
         rows = [json.loads(line) for line in self.runs_jsonl.read_text().splitlines() if line.strip()]
         if not rows:
             return
+        rank_by = getattr(self, "rank_by", None)
+        if rank_by:
+            rows.sort(key=lambda r: r.get(rank_by, float("inf")))
         cols = list(dict.fromkeys(k for r in rows for k in r))  # union, order-preserving
         with open(self.summary_dir / "leaderboard.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=cols)

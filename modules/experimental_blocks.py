@@ -10,6 +10,7 @@ from scipy.signal import resample_poly, find_peaks, correlate, resample
 from fractions import Fraction
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import zarr
 import time
 from datetime import datetime
@@ -33,6 +34,26 @@ def generate_zadoff_chu(length, root=1):
     max_val = np.max(np.abs(zc))
     zc = zc / max_val
     return np.real(zc)
+
+def generate_zadoff_chu_freq(length, root=1):
+    '''Complex constant-modulus (CAZAC) Zadoff-Chu sequence for mapping onto OFDM
+    subcarriers. |zc| = 1, giving a band-limited preamble with a sharp autocorrelation
+    and low PAPR.'''
+    n = np.arange(length)
+    if length % 2 == 0:
+        return np.exp(-1j * np.pi * root * n * (n + 1) / length)
+    return np.exp(-1j * np.pi * root * n ** 2 / length)
+
+def band_limited_zc_preamble(preamble_length, baseband_sampling_rate, f_min, f_max, amplitude=3.0):
+    '''Band-limited Zadoff-Chu preamble: a CAZAC sequence on the passband bins only,
+    IFFT'd to time and scaled to +-amplitude peak. Single source of truth shared by
+    ModulateDataOFDM and encoder/decoder training so both use an identical preamble.'''
+    freqs = np.fft.rfftfreq(preamble_length, d=1.0 / baseband_sampling_rate)
+    in_band = np.where((freqs >= f_min) & (freqs <= f_max))[0]
+    spectrum = np.zeros(preamble_length // 2 + 1, dtype=complex)
+    spectrum[in_band] = generate_zadoff_chu_freq(len(in_band))
+    preamble = np.fft.irfft(spectrum, n=preamble_length, norm='ortho')
+    return amplitude * preamble / np.max(np.abs(preamble))
 
 class ModulateDataOFDM(FunctionalBlock):
     def __init__(self,
@@ -76,6 +97,18 @@ class ModulateDataOFDM(FunctionalBlock):
         assert f_max < nyquist_frequency, f"Maximum subcarrier frequency must be less than Nyquist frequency of {nyquist_frequency}"
         assert self.output_length >= self.baseband_burst_length, f"Output waveform length must be at least as long as the baseband burst length of {self.baseband_burst_length} samples"
 
+        self.preamble = self._build_preamble()
+
+    def _build_preamble(self):
+        '''Band-limited Zadoff-Chu preamble on the active-carrier passband, so it survives
+        the in-band encoder/decoder and carries no energy in the LED's low-frequency noise
+        band. Scaled to peak 3 to own the burst global peak.'''
+        if self.preamble_method != "zadoff_chu":
+            raise ValueError("No valid preamble method chosen!")
+        return band_limited_zc_preamble(
+            self.preamble_length, self.baseband_sampling_rate,
+            float(self.subcarrier_freqs_hz.min()), float(self.subcarrier_freqs_hz.max()), amplitude=3.0)
+
     def transform(self, x:Signal) -> Signal:
         source_bits = generate_random_bits(self.bits_per_symbol * self.num_carriers)
         active_subcarriers = self.constellation.bits_to_symbols(source_bits)
@@ -89,15 +122,10 @@ class ModulateDataOFDM(FunctionalBlock):
         cyclic_prefix = time_domain_signal[-self.cyclic_prefix_length:]
         time_domain_signal_with_cp = np.concatenate((cyclic_prefix, time_domain_signal))
 
-        if self.preamble_method == "zadoff_chu":
-            preamble = generate_zadoff_chu(self.preamble_length)
-        else:
-            raise ValueError("No valid preamble method chosen!")
-
-        # Scale preamble to a fixed peak of 3 and clip the OFDM to the same +-3,
-        # so the preamble always owns the global peak and normalizes to a constant
-        # height after the AWG's global normalization.
-        preamble = 3 * preamble / np.max(np.abs(preamble))
+        # Band-limited ZC preamble (precomputed); clip the OFDM to the same +-3 so the
+        # preamble owns the global peak and normalizes to a constant height after the
+        # AWG's global normalization.
+        preamble = self.preamble
         time_domain_signal_with_cp = np.clip(time_domain_signal_with_cp, -3, 3)
         baseband_burst = np.concatenate((preamble, time_domain_signal_with_cp))
 
@@ -290,6 +318,59 @@ class SendAndReceiveOFDM(Chain):
                  demodulate_block: DemodulateDataOFDM
                  ):
         super().__init__([modulate_block, send_block, receive_block, resample_block, demodulate_block])
+
+
+class ApplyEncoder(FunctionalBlock):
+    '''
+    Insert a frozen encoder after modulation: pre-distort the whole burst (preamble
+    included) so it shares the encoder's group delay with the payload, then rebuild the
+    AWG waveform. Output is clamped to +-clip_value.
+    '''
+    def __init__(self, encoder, modulate_block: ModulateDataOFDM, clip_value: float, device="cpu"):
+        super().__init__(modulate_block.fs_out)
+        self.encoder = encoder
+        self.output_length = modulate_block.output_length
+        self.clip_value = clip_value
+        self.device = device
+
+    def _apply(self, signal):
+        t = torch.tensor(signal, dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            return self.encoder(t).squeeze(0).cpu().numpy()
+
+    def transform(self, x: Signal) -> Signal:
+        burst = np.array(x.data, copy=True)
+        encoded = np.clip(self._apply(burst), -self.clip_value, self.clip_value)
+        x.data = encoded
+        x.artifact_container['awg_waveform'] = np.clip(resample(encoded, self.output_length),
+                                                       -self.clip_value, self.clip_value)
+        x.artifact_container['encoder_input'] = burst
+        x.artifact_container['encoder_output'] = encoded
+        return x
+
+
+class ApplyDecoder(FunctionalBlock):
+    '''Insert a frozen decoder before demodulation: equalize the whole received stream
+    so the encoder/channel/decoder link is transparent, then let demod sync + demodulate
+    the cleaned signal normally. The preamble is already band-limited (see
+    ModulateDataOFDM), so the in-band equalizer preserves it and sync needs no extra step.'''
+    def __init__(self, decoder, demodulate_block: DemodulateDataOFDM, device="cpu"):
+        super().__init__(demodulate_block.fs_in)
+        self.decoder = decoder
+        self.device = device
+
+    def _apply(self, signal):
+        t = torch.tensor(signal, dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            return self.decoder(t).squeeze(0).cpu().numpy()
+
+    def transform(self, x: Signal) -> Signal:
+        received = np.array(x.data, copy=True)
+        decoded = self._apply(received)
+        x.data = decoded
+        x.artifact_container['decoder_input'] = received
+        x.artifact_container['decoder_output'] = decoded
+        return x
 
 
 class AppendToDataset(ActionBlock):
