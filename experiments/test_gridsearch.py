@@ -108,13 +108,16 @@ CHANNEL_GRID = {
             "params": {
                 "nlayers":          [3],
                 "dilation_base":    2,
-                "num_taps":         10,
+                "kernel_size":      10,
                 "hidden_channels":  [8, 16],
                 "learn_noise":      False,
                 "gaussian":         True,
                 "epochs":           100,
                 "lr":               1e-3,
                 "batch_size":       16,
+                "factor":           0.5,
+                "patience":         5,
+                "min_lr":           1e-6,
             },
         },
         {
@@ -137,7 +140,7 @@ ENCODER_DECODER_GRID = {
     "params": {
         "nlayers":         [2],
         "dilation_base":   2,
-        "num_taps":        10,
+        "kernel_size":     10,
         "hidden_channels": 4,
         "epochs":          1000,
         "lr":              1e-3,

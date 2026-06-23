@@ -61,14 +61,14 @@ class TCNBlock(nn.Module):
         return out + x # residual connection
 
 class TCN(nn.Module):
-    def __init__(self, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32):
+    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32):
         super().__init__()
         layers = []
         in_channels = 1
         for i in range(nlayers):
             dilation = dilation_base ** i
             layers.append(
-                TCNBlock(in_channels, hidden_channels, num_taps, dilation)
+                TCNBlock(in_channels, hidden_channels, kernel_size, dilation)
             )
             in_channels = hidden_channels
         self.tcn = nn.Sequential(*layers)
@@ -78,7 +78,7 @@ class TCN(nn.Module):
         self.receptive_field = 1
         for i in range(nlayers):
             dilation = dilation_base ** i
-            self.receptive_field += (num_taps - 1) * dilation
+            self.receptive_field += (kernel_size - 1) * dilation
 
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]
@@ -94,7 +94,7 @@ class TCN(nn.Module):
         return total_params
 
 class TCN_channel(nn.Module):
-    def __init__(self, nlayers=3, dilation_base=2, num_taps=10,
+    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10,
                  hidden_channels=32, learn_noise=False, gaussian=True):
         super().__init__()
         layers = []
@@ -102,7 +102,7 @@ class TCN_channel(nn.Module):
         for i in range(nlayers):
             dilation = dilation_base ** i
             layers.append(
-                TCNBlock(in_channels, hidden_channels, num_taps, dilation)
+                TCNBlock(in_channels, hidden_channels, kernel_size, dilation)
             )
             in_channels = hidden_channels
         self.learn_noise = learn_noise
@@ -111,14 +111,14 @@ class TCN_channel(nn.Module):
             self.readout = nn.Conv1d(hidden_channels, 2, kernel_size=1) # 2 channels mean | std
         else:
             self.readout = nn.Conv1d(hidden_channels, 3, kernel_size=1) # 3 channels mean | std | nu
-        self.num_taps = num_taps
+        self.kernel_size = kernel_size
         self.gaussian = gaussian
 
         # Calculate the total receptive field for the whole TCN stack
         self.receptive_field = 1
         for i in range(nlayers):
             dilation = dilation_base ** i
-            self.receptive_field += (num_taps - 1) * dilation
+            self.receptive_field += (kernel_size - 1) * dilation
 
         if not gaussian:
             with torch.no_grad():

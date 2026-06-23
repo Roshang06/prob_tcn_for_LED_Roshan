@@ -22,14 +22,15 @@ from pyflux.core.chain import Chain
 from modules.experimental_blocks import ApplyEncoder, ApplyDecoder
 from modules.grid_search.base import GridSearchBase
 from modules.models import TCN
-from modules.utils import calculate_BER, evm_loss
+from modules.utils import calculate_BER, evm_pct
 
-ARCH_KEYS = ("nlayers", "dilation_base", "num_taps", "hidden_channels")
+ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels")
 
 
 class EncoderDecoderValidation(GridSearchBase):
     def __init__(self, ed_models, ofdm_blocks, num_trials, constellation, clip_value,
-                 device="cpu", seed=0, experiments_dir=None, experiment_name="ed_validation"):
+                 device="cpu", seed=0, experiments_dir=None, experiment_name="ed_validation",
+                 run_prefix=None):
         self.ofdm_blocks = ofdm_blocks  # (modulate, send, measure, resample, demod)
         self.num_trials = num_trials
         self.constellation = constellation
@@ -38,12 +39,14 @@ class EncoderDecoderValidation(GridSearchBase):
         points = [{"model": m["run_id"],
                    "params": {k: m["arch"][k] for k in ARCH_KEYS},
                    "channel_form": m["channel_form"],
+                   "channel_run_id": m.get("channel_run_id"),
                    "checkpoint": str(m["checkpoint"])}
                   for m in ed_models]
         super().__init__(points, {"ed_models": [m["run_id"] for m in ed_models]},
                          {"num_trials": num_trials}, experiments_dir, device, seed,
-                         experiment_name, extra_manifest={"num_trials": num_trials})
-        self.rank_by = "evm"  # in-band EVM on the active-carrier (sent vs decoded) symbols
+                         experiment_name, run_prefix=run_prefix,
+                         extra_manifest={"num_trials": num_trials})
+        self.rank_by = "evm_pct"
 
     def _prepare(self):
         self.val_group = zarr.open_group(self.exp_dir / "validation.zarr", mode="a")
@@ -94,10 +97,11 @@ class EncoderDecoderValidation(GridSearchBase):
         sent_t = torch.tensor(sent_syms)
         recv_t = torch.tensor(recv_syms)
         metrics = {
-            "evm": evm_loss(sent_t, recv_t).item(),
+            "evm_pct": evm_pct(sent_t, recv_t).item(),
             "ber": calculate_BER(recv_t.flatten(), np.concatenate(true_bits), self.constellation),
             "num_params": encoder.get_num_params() + decoder.get_num_params(),
             "channel_form": point["channel_form"],
+            "channel_run_id": point.get("channel_run_id"),
         }
 
         self._store_waveforms(run_dir.name, np.stack(sent_time), np.stack(recv_time), point["channel_form"])
@@ -110,7 +114,7 @@ class EncoderDecoderValidation(GridSearchBase):
     def _store_waveforms(self, model_id, sent, received, channel_form):
         g = self.val_group[model_id] if model_id in self.val_group else self.val_group.create_group(model_id)
         for name, arr in (("sent_time", sent), ("received_time", received)):
-            za = g.create_array(name, shape=arr.shape, chunks=arr.shape, dtype=arr.dtype)
+            za = g.create_array(name, shape=arr.shape, chunks=arr.shape, dtype=arr.dtype, overwrite=True)
             za[:] = arr
         g.attrs["channel_form"] = channel_form
 
@@ -190,6 +194,7 @@ def select_encoder_decoders(ed_exp_dir, channel_exp_dir=None, run_ids=None):
             "run_id": rid,
             "arch": {k: row[k] for k in ARCH_KEYS},
             "checkpoint": ed_exp_dir / "runs" / rid / "model.pt",
+            "channel_run_id": row.get("channel_run_id"),
             "channel_form": derive_channel_form(channel_map.get(row.get("channel_run_id"))),
         })
     return selected

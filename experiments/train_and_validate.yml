@@ -1,8 +1,17 @@
 RUNTIME:
   DEVICE: cpu
   SEED: 0
+
+# Set either path to reuse a previously trained experiment and skip that grid
+# search step entirely. Leave unset (or null) to run a fresh grid search.
+# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/channel_models_YYYYMMDD_HHMM
+# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/encoder_decoder_YYYYMMDD_HHMM
+
+
+# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/channel_models_20260623_0955
+# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/encoder_decoder_20260623_0959
 HARDWARE_RESOURCES:
-    Agilent_33250A: 
+    Agilent_33250A:
         DRIVER_PATH: pyflux.hardware.drivers
         ID: Agilent Technologies,33250A,0,1.03-1.01-1.00-03-1
     Tektronix_TDS2000:
@@ -12,9 +21,9 @@ HARDWARE_RESOURCES:
         DRIVER_PATH: pyflux.hardware.drivers
         ID: HEWLETT-PACKARD,E3631A,0,1.6-5.0-1.0
 DATA_COLLECTION:
-  N: 10 # Number of datapoints collected at each DC offset
-  DC_OFFSETS: [0.122] # A
-  F_MINS: [300e3] # Hz 
+  N: 5 # Number of datapoints collected at the DC offset
+  DC_OFFSETS: [0.122] # A (single offset per dataset)
+  F_MINS: [300e3] # Hz
   F_MAXS: [12.99e6] # Hz
   OSC_SAMPLE_RATES: [62.5e6] # Hz
   SUBCARRIER_SPACING: 1e4 # Hz
@@ -22,11 +31,11 @@ DATA_COLLECTION:
   AWG_TABLE_FRACTION: 0.5
   CP_LENGTH_FRACTION: 0.125
   PREAMBLE_LENGTH: 256
-  MODULATION_FORMAT: "qpsk"
+  MODULATION_FORMAT: "m7_apsk_constellation"
   OSC_SCALE: 0.2
   POWER_MIN: 0.5  # minimum symbol power
   POWER_MAX: 3.0  # maximum symbol power; at 3 the ±3 clip becomes apparent
-  DATASET_PATH: "/home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/dc0.122A_fmin300000_fmax1.299e+07_20260615_1430.zarr"
+  DATASET_PATH: null
 
 CHANNEL_GRID_SEARCH:
   RECEPTIVE_FIELD: 20
@@ -37,34 +46,39 @@ CHANNEL_GRID_SEARCH:
   models:
     - model: gmp
       params:
-        memory_linear: [4, 8]
-        memory_nonlinear: 4
-        nonlinearity_order: 5
-        cross_term_depth: [0, 2]
+        memory_linear: 12
+        memory_nonlinear: 12
+        nonlinearity_order: 3
+        cross_term_depth: [0, 2, 4]
         ridge: 1.0e-3
 
     - model: tcn
       params:
-        nlayers: [2, 3]
-        hidden_channels: [16, 32]
-        kernel_size: 10
+        nlayers: 2
+        hidden_channels: [4, 8]
+        kernel_size: 5
         dilation_base: 2
-        epochs: 200
+        epochs: 20
         lr: 1.0e-3
-        factor: 0.5
+        batch_size: 16
+        factor: 0.5 # Learning rate scheduler
         patience: 5
         min_lr: 1.0e-6
+        distribution: ["none", "gaussian", "students_t"]
 
 ENCODER_DECODER:
   CONSTELLATION: qpsk
-  PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to
+  PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to +-this
   PREAMBLE_IN_LOSS: true      # preamble is always in the burst; penalize it in the loss or not
   params:
-    nlayers: [2, 3]
+    nlayers: [2]
     dilation_base: 2
     kernel_size: 5
     hidden_channels: 8
-    epochs: 100
+    epochs: 600
     lr: 1.0e-3
     weight_decay: 1.0e-5    # AdamW L2 regularization; 0 disables. List -> swept.
     batch_size: 16
+    factor: 0.5 # Learning rate scheduler
+    patience: 5
+    min_lr: 1.0e-6

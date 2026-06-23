@@ -16,6 +16,13 @@ from torch.utils.data import DataLoader, TensorDataset
 from modules.models import TCN_channel, GeneralizedMemoryPolynomial
 
 
+_DIST_TO_FLAGS = {
+    "none":       {"learn_noise": False, "gaussian": True},
+    "gaussian":   {"learn_noise": True,  "gaussian": True},
+    "students_t": {"learn_noise": True,  "gaussian": False},
+}
+
+
 def gaussian_nll(residual, std):
     return torch.mean(0.5 * torch.log(2 * torch.pi * std ** 2) + 0.5 * (residual / std) ** 2)
 
@@ -60,8 +67,8 @@ class ChannelModel(Protocol):
 
 class TCNAdapter:
     name = "tcn"
-    ARCH_KEYS = ("nlayers", "dilation_base", "num_taps", "hidden_channels", "learn_noise", "gaussian")
-    TRAIN_KEYS = ("epochs", "lr", "batch_size")
+    ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "distribution", "learn_noise", "gaussian")
+    TRAIN_KEYS = ("epochs", "lr", "batch_size", "factor", "patience", "min_lr")
 
     def __init__(self, model: TCN_channel, train_params: dict, device: str, shared: dict = None):
         self.model = model
@@ -72,6 +79,8 @@ class TCNAdapter:
     @classmethod
     def from_config(cls, params: dict, device: str, shared: dict = None) -> "TCNAdapter":
         arch = {k: params[k] for k in cls.ARCH_KEYS if k in params}
+        if "distribution" in arch:
+            arch.update(_DIST_TO_FLAGS[arch.pop("distribution")])
         model = TCN_channel(**arch).to(device)
         train_params = {k: params[k] for k in cls.TRAIN_KEYS if k in params}
         return cls(model, train_params, device, shared=shared)
@@ -117,6 +126,15 @@ class TCNAdapter:
         loader = DataLoader(TensorDataset(X, Y), batch_size=batch_size, shuffle=True)
         optimizer = optim.AdamW(self.model.parameters(), lr=float(self.train_params["lr"]))
 
+        scheduler = None
+        if "patience" in self.train_params:
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="min",
+                factor=float(self.train_params.get("factor", 0.5)),
+                patience=int(self.train_params["patience"]),
+                min_lr=float(self.train_params.get("min_lr", 1e-6)),
+            )
+
         self.model.train()
         history = {"loss": []}
         if has_val:
@@ -130,9 +148,13 @@ class TCNAdapter:
                 optimizer.step()
                 epoch_loss += loss.item()
                 n_batches += 1
-            history["loss"].append(epoch_loss / n_batches)
+            train_loss = epoch_loss / n_batches
+            history["loss"].append(train_loss)
             if has_val:
-                history["val_loss"].append(self._val_loss(X_val, Y_val))
+                val_loss = self._val_loss(X_val, Y_val)
+                history["val_loss"].append(val_loss)
+            if scheduler is not None:
+                scheduler.step(val_loss if has_val else train_loss)
         return history
 
     def predict(self, X):

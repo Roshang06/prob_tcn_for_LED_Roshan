@@ -20,10 +20,10 @@ from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
 from modules.models import TCN
-from modules.utils import (calculate_BER, evm_loss, in_band_time_loss,
+from modules.utils import (calculate_BER, evm_pct, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time)
 
-ARCH_KEYS = ("nlayers", "dilation_base", "num_taps", "hidden_channels")
+ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels")
 
 
 class EncoderDecoderGridSearch(GridSearchBase):
@@ -36,7 +36,8 @@ class EncoderDecoderGridSearch(GridSearchBase):
                  device="cpu",
                  seed=0,
                  experiment_name="encoder_decoder",
-                 preamble_length=256
+                 preamble_length=256,
+                 run_prefix=None,
                  ):
 
         self.dataset_path = Path(dataset_path)
@@ -51,11 +52,11 @@ class EncoderDecoderGridSearch(GridSearchBase):
         points = [{**p, "channel_run_id": run_id} for p in ed_points for run_id in self.channel_models]
         shared_params = {k: v for k, v in grid_config.items() if k != "params"}
         super().__init__(points, grid_config, shared_params, experiments_dir, device, seed,
-                          experiment_name, extra_manifest={
+                          experiment_name, run_prefix=run_prefix, extra_manifest={
                               "dataset_path": str(self.dataset_path),
                               "channel_models": list(self.channel_models),
                           })
-        self.rank_by = "evm"  # in-band EVM on the active-carrier (sent vs decoded) symbols
+        self.rank_by = "evm_pct"
 
     @classmethod
     def from_experiment_config(cls,
@@ -64,22 +65,29 @@ class EncoderDecoderGridSearch(GridSearchBase):
                                device=None,
                                seed=None,
                                experiment_name="encoder_decoder",
-                               experiments_dir=None
+                               experiments_dir=None,
+                               dataset_path=None,
+                               run_prefix=None,
                                ):
         '''
         Build the E/D grid from the ENCODER_DECODER section of the config,
         paired against an already-selected list of channel_models (see
         orchestrator.select_channel_models).
+
+        dataset_path overrides DATA_COLLECTION.DATASET_PATH from the config file;
+        use this when the dataset was just created and the YAML still shows null.
         '''
         with open(Path(config_path)) as f:
             full = yaml.safe_load(f)
         grid_config = {k.lower(): v for k, v in full["ENCODER_DECODER"].items()}
-        dataset_path = full["DATA_COLLECTION"]["DATASET_PATH"]
+        if dataset_path is None:
+            dataset_path = full["DATA_COLLECTION"]["DATASET_PATH"]
         device, seed = resolve_runtime(full, device, seed)
         return cls(grid_config, channel_models=channel_models, dataset_path=dataset_path,
                    device=device, seed=seed, experiment_name=experiment_name,
                    experiments_dir=experiments_dir,
-                   preamble_length=int(full["DATA_COLLECTION"]["PREAMBLE_LENGTH"]))
+                   preamble_length=int(full["DATA_COLLECTION"]["PREAMBLE_LENGTH"]),
+                   run_prefix=run_prefix)
 
     def _prepare(self, ofdm_config=None):
         if ofdm_config is None:
@@ -154,7 +162,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         if was_training:
             encoder.train(); decoder.train()
         ber = calculate_BER(recv_freq.flatten(), true_bits.flatten(), constellation=self.constellation)
-        return {"ber": ber, "evm": evm_loss(sent_freq, recv_freq).item()}
+        return {"ber": ber, "evm_pct": evm_pct(sent_freq, recv_freq).item()}
 
     def _run_point(self, point, run_dir, context) -> dict:
         ofdm_config, channel_models = context
@@ -167,6 +175,15 @@ class EncoderDecoderGridSearch(GridSearchBase):
         optimizer = optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()),
                                  lr=float(p["lr"]),
                                  weight_decay=float(p.get("weight_decay", 0.0)))
+
+        scheduler = None
+        if "patience" in p:
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="min",
+                factor=float(p.get("factor", 0.5)),
+                patience=int(p["patience"]),
+                min_lr=float(p.get("min_lr", 1e-6)),
+            )
 
         num_bits = len(ofdm_config.active_carrier_indices) * self.constellation.bits_per_symbol
         batch_size = p["batch_size"]
@@ -184,11 +201,13 @@ class EncoderDecoderGridSearch(GridSearchBase):
             # optionally exclude the preamble region from the loss (decoder still sees it)
             offset = 0 if self.preamble_in_loss else self.preamble_length
             loss = in_band_time_loss(sent_time[:, offset:], decoded_time[:, offset:],
-                                     ofdm_config.active_carrier_indices, ofdm_config.baseband_fft_length, p["num_taps"])
+                                     ofdm_config.active_carrier_indices, ofdm_config.baseband_fft_length, p["kernel_size"])
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step(loss.item())
             history["loss"].append(loss.item())
             history["ber"].append(self._test_ber(encoder, decoder, channel_model, ofdm_config, eval_bits, eval_sent_time))
 

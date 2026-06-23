@@ -11,7 +11,6 @@ import torch.nn.functional as F
 import sys
 import time
 import json
-import warnings
 from modules.models import TCN_channel, TCN
 
 @dataclass
@@ -79,16 +78,28 @@ def calculate_rrmse_pct_loss(y, y_pred):
 def load_ofdm_dataset(file_path, device):
     '''Read an AppendToDataset zarr group into (sent, received, OFDMConfig).
 
-    sent/received are the CP-removed baseband frames written by AppendToDataset,
-    so both have length baseband_fft_length. Geometry is recovered from the group
-    attrs (active_carrier_indices, f_min_hz, cyclic_prefix_length) plus the array
-    width.'''
+    Supports two zarr formats:
+      - New (burst): sent_burst / received_burst arrays, each of length
+        preamble_length + cp_length + fft_length. The preamble_length attr is
+        required; fft_length is back-computed from array width.
+      - Legacy (symbol only): sent_baseband / received_baseband arrays, each
+        of length fft_length (CP already removed).'''
     root = zarr.open_group(file_path, mode="r")
-    sent = torch.tensor(root["sent_baseband"][:], dtype=torch.float32, device=device)
-    received = torch.tensor(root["received_baseband"][:], dtype=torch.float32, device=device)
+
+    if "sent_burst" in root:
+        sent = torch.tensor(root["sent_burst"][:], dtype=torch.float32, device=device)
+        received = torch.tensor(root["received_burst"][:], dtype=torch.float32, device=device)
+        preamble_length = int(root.attrs["preamble_length"])
+        cp_length = int(root.attrs["cyclic_prefix_length"])
+        fft_length = sent.shape[1] - preamble_length - cp_length
+    else:
+        print("[load_ofdm_dataset] WARNING: loading legacy format (symbol only, no preamble/CP)")
+        sent = torch.tensor(root["sent_baseband"][:], dtype=torch.float32, device=device)
+        received = torch.tensor(root["received_baseband"][:], dtype=torch.float32, device=device)
+        fft_length = sent.shape[1]
+        cp_length = int(root.attrs["cyclic_prefix_length"])
 
     indices = torch.tensor(root.attrs["active_carrier_indices"], dtype=torch.int)
-    fft_length = sent.shape[1]
     num_carriers = len(indices)
     num_leading = int(indices[0]) - 1  # leading zero subcarriers, DC excluded
     num_trailing = fft_length // 2 - 1 - num_leading - num_carriers
@@ -97,7 +108,7 @@ def load_ofdm_dataset(file_path, device):
     config = OFDMConfig(
         subcarrier_spacing=spacing,
         baseband_fft_length=fft_length,
-        cyclic_prefix_length=int(root.attrs["cyclic_prefix_length"]),
+        cyclic_prefix_length=cp_length,
         active_carrier_indices=indices.to(device),
         subcarrier_freqs_hz=(indices.to(torch.float32) * spacing).to(device),
         num_leading_zeros=num_leading,
@@ -243,26 +254,24 @@ def in_band_filter(x, ks_indices, nfft):
     filtered_x = F.conv1d(x.unsqueeze(1), h, padding='same').squeeze(1)
     return filtered_x
 
-def in_band_time_loss(sent_time, decoded_time, ks_indices, n_fft, num_taps):
-    """Compute in-band loss directly in time domain using filtering"""
-    # Create frequency mask
-    mask = torch.zeros(n_fft, device=sent_time.device)
-    neg_ks_indices = n_fft - ks_indices
-    mask[ks_indices] = 1.0
-    mask[neg_ks_indices] = 1.0
+def in_band_time_loss(sent_time, decoded_time, ks_indices, n_fft, kernel_size=None):
+    """In-band loss computed directly in the frequency domain.
 
-    # Convert to time-domain filter (this is differentiable)
-    impulse_response = torch.fft.ifftshift(torch.fft.ifft(mask).real)
-    h = impulse_response.view(1, 1, -1)
+    Compares sent and decoded signals only on the active subcarrier bins,
+    with no time-domain filter or padding — zero phase by construction.
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*padding='same' with even kernel.*")
-        sent_filtered = F.conv1d(sent_time.unsqueeze(1), h, padding='same').squeeze(1)
-        decoded_filtered = F.conv1d(decoded_time.unsqueeze(1), h, padding='same').squeeze(1)
-
-    # Compute MSE on filtered signals (equivalent to in-band frequency loss)
-    loss = torch.mean((sent_filtered[:, num_taps:] - decoded_filtered[:, num_taps:]).pow(2))
-    return loss
+    Works for any input length N (symbol-only or full burst [preamble|CP|symbol]):
+    carrier indices defined for the n_fft-point FFT are scaled to the actual
+    N-point FFT by frequency, so the same physical frequencies are selected
+    regardless of how much of the burst is included.
+    """
+    N = sent_time.shape[-1]
+    sent_fft = torch.fft.rfft(sent_time, norm="ortho")
+    decoded_fft = torch.fft.rfft(decoded_time, norm="ortho")
+    # Scale carrier bin indices from n_fft-point FFT to N-point FFT
+    active = (ks_indices.float() * (N / n_fft)).round().long().clamp(0, N // 2)
+    err = sent_fft[:, active] - decoded_fft[:, active]
+    return torch.mean(err.real ** 2 + err.imag ** 2)
 
 def calculate_AIC(nll, num_params, num_data_points):
     return 2 * num_params + 2 * nll * num_data_points # Average NLL times number of data points evaluated
@@ -300,8 +309,10 @@ def calculate_BER(received_symbols, true_bits, constellation, return_decided_bit
         return BER, decided_bits_flat
     return BER
 
-def evm_loss(true_symbols, predicted_symbols):
-    return torch.mean(torch.abs(true_symbols - predicted_symbols) ** 2)
+def evm_pct(true_symbols, predicted_symbols):
+    signal_power = torch.mean(torch.abs(true_symbols) ** 2)
+    mse = torch.mean(torch.abs(true_symbols - predicted_symbols) ** 2)
+    return torch.sqrt(mse / (signal_power + 1e-12)) * 100
 
 def load_runs_final_artifact(
     run_name,
@@ -370,7 +381,7 @@ def load_runs_final_artifact(
         model = TCN_channel(
             nlayers=cfg["nlayers"],
             dilation_base=cfg["dilation_base"],
-            num_taps=cfg["num_taps"],
+            kernel_size=cfg["kernel_size"],
             hidden_channels=cfg["hidden_channels"],
             learn_noise=cfg.get("learn_noise", False),
             gaussian=cfg.get("gaussian", True)
@@ -382,13 +393,13 @@ def load_runs_final_artifact(
         encoder = TCN(
             nlayers=cfg["nlayers"],
             dilation_base=cfg["dilation_base"],
-            num_taps=cfg["num_taps"],
+            kernel_size=cfg["kernel_size"],
             hidden_channels=cfg["hidden_channels"]
         )
         decoder = TCN(
             nlayers=cfg["nlayers"],
             dilation_base=cfg["dilation_base"],
-            num_taps=cfg["num_taps"],
+            kernel_size=cfg["kernel_size"],
             hidden_channels=cfg["hidden_channels"]
         )
         encoder.load_state_dict(weights["time_encoder"])

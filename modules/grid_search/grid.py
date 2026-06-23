@@ -15,7 +15,7 @@ A grid config is a YAML file like:
         params:
           nlayers: [2, 3]
           hidden_channels: [16, 32]
-          num_taps: 10
+          kernel_size: 10
           epochs: 200
           lr: 1.0e-3
 

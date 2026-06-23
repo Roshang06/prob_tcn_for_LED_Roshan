@@ -65,7 +65,9 @@ class ModulateDataOFDM(FunctionalBlock):
                  awg_table_fraction: float,
                  cyclic_prefix_fraction: float,
                  upsample_factor: int,
-                 preamble_length: int = 256
+                 preamble_length: int = 256,
+                 power_min: float = None,
+                 power_max: float = None,
                  ):
         self.AWG_TABLE_LENGTH = 16_384
         self.output_length = int(self.AWG_TABLE_LENGTH * awg_table_fraction)
@@ -97,6 +99,8 @@ class ModulateDataOFDM(FunctionalBlock):
         assert f_max < nyquist_frequency, f"Maximum subcarrier frequency must be less than Nyquist frequency of {nyquist_frequency}"
         assert self.output_length >= self.baseband_burst_length, f"Output waveform length must be at least as long as the baseband burst length of {self.baseband_burst_length} samples"
 
+        self.power_min = power_min
+        self.power_max = power_max
         self.preamble = self._build_preamble()
 
     def _build_preamble(self):
@@ -119,6 +123,14 @@ class ModulateDataOFDM(FunctionalBlock):
         half_spectrum[self.first_data_bin : self.first_data_bin + self.num_carriers] = active_subcarriers
         time_domain_signal = np.fft.irfft(half_spectrum, n=self.baseband_fft_length, norm='ortho') # Use sinc interpolation for smooth analog waveform
 
+        # Random power scaling: normalize to unit RMS then scale to U(power_min, power_max).
+        # Increases training diversity — higher powers drive the LED harder, making the
+        # hard clip at ±3 progressively more visible.
+        if self.power_min is not None and self.power_max is not None:
+            rms = np.sqrt(np.mean(time_domain_signal ** 2)) + 1e-12
+            target_power = np.random.uniform(self.power_min, self.power_max)
+            time_domain_signal = time_domain_signal / rms * np.sqrt(target_power)
+
         cyclic_prefix = time_domain_signal[-self.cyclic_prefix_length:]
         time_domain_signal_with_cp = np.concatenate((cyclic_prefix, time_domain_signal))
 
@@ -136,11 +148,12 @@ class ModulateDataOFDM(FunctionalBlock):
 
 
         payload = dict(
-            preamble=preamble,               
+            preamble=preamble,
             source_bits=source_bits,
             sent_symbols=active_subcarriers,
-            sent_baseband=time_domain_signal,    # model x[t]
-            awg_waveform=awg_waveform,       # outputlength points for the instrument
+            sent_baseband=time_domain_signal,    # symbol only (no CP/preamble); kept for validation plotting
+            sent_burst=baseband_burst,           # full burst [preamble | CP | symbol]; used for channel model training
+            awg_waveform=awg_waveform,
             awg_frequency=self.awg_frequency,
         )
 
@@ -276,6 +289,9 @@ class DemodulateDataOFDM(FunctionalBlock):
         ofdm_symbol = y_t[ofdm_symbol_start : ofdm_symbol_end]
         cyclic_prefix_removed = ofdm_symbol[self.cyclic_prefix_length :]
 
+        # Preamble-aligned full burst, same length as sent_burst
+        x.artifact_container['received_burst'] = y_t[preamble_start : preamble_start + len(preamble) + self.ofdm_symbol_length_with_cp]
+
         # Take FFT and extract subcarriers
         Y_k = np.fft.fft(cyclic_prefix_removed, norm='ortho')[self.subcarrier_indicies]
         bits_estimated = self.constellation.symbols_to_bits(Y_k)
@@ -381,6 +397,7 @@ class AppendToDataset(ActionBlock):
                  f_max: float,
                  active_carrier_indices,
                  cyclic_prefix_length: int,
+                 preamble_length: int,
                  modulation_format: str,
                  block_size: int = 64,
                  dataset_path: Path = None):
@@ -392,24 +409,24 @@ class AppendToDataset(ActionBlock):
             self.dataset_path = Path(dataset_path).resolve()
             self.group = zarr.open_group(self.dataset_path, mode="a")
             print(f"[AppendToDataset] appending to existing dataset: {self.dataset_path}")
-            return
+        else:
+            sweeps_dir = Path(__file__).resolve().parents[1] / "data" / "sweeps"
+            sweeps_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            name = f"dc{dc_offset:g}A_fmin{f_min:g}_fmax{f_max:g}_{timestamp}.zarr"
+            self.dataset_path = sweeps_dir / name
+            self.group = zarr.open_group(self.dataset_path, mode="w-")
+            print(f"[AppendToDataset] created new dataset: {self.dataset_path}")
 
-        sweeps_dir = Path(__file__).resolve().parents[1] / "data" / "sweeps"
-        sweeps_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        name = f"dc{dc_offset:g}A_fmin{f_min:g}_fmax{f_max:g}_{timestamp}.zarr"
-        self.dataset_path = sweeps_dir / name
-
-        self.group = zarr.open_group(self.dataset_path, mode="w-")
         self.group.attrs.update({
             "dc_offset_A": float(dc_offset),
             "f_min_hz": float(f_min),
             "f_max_hz": float(f_max),
             "active_carrier_indices": np.asarray(active_carrier_indices).astype(int).tolist(),
             "cyclic_prefix_length": int(cyclic_prefix_length),
+            "preamble_length": int(preamble_length),
             "modulation_format": str(modulation_format),
         })
-        print(f"[AppendToDataset] created new dataset: {self.dataset_path}")
 
     @staticmethod
     def _bits_to_array(bits):
@@ -429,8 +446,8 @@ class AppendToDataset(ActionBlock):
 
     def action(self, x: Signal):
         fields = {
-            "sent_baseband": np.asarray(x.artifact_container["sent_baseband"], dtype="float32"),
-            "received_baseband": np.asarray(x.data, dtype="float32"),
+            "sent_burst": np.asarray(x.artifact_container["sent_burst"], dtype="float32"),
+            "received_burst": np.asarray(x.artifact_container["received_burst"], dtype="float32"),
             "source_bits": self._bits_to_array(x.artifact_container["source_bits"]),
             "decoded_bits": self._bits_to_array(x.artifact_container["estimated_bits"]),
         }
