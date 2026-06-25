@@ -123,6 +123,8 @@ class GridSearchBase:
             for i in range(n):
                 w.writerow([i, *(history[k][i] for k in history)])
         self._plot_history(run_dir, history)
+        if "lr" in history:
+            self._plot_lr(run_dir, history["lr"])
 
     def _plot_history(self, run_dir: Path, history: dict):
         '''Save a train/validation loss-vs-epoch curve under plots/ for trainable
@@ -146,6 +148,18 @@ class GridSearchBase:
         plots_dir = run_dir / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
         fig.savefig(plots_dir / "loss.png", dpi=120)
+
+    def _plot_lr(self, run_dir: Path, lr_values: list):
+        fig = Figure(figsize=(7, 3))
+        ax = fig.subplots()
+        ax.plot(range(len(lr_values)), lr_values, marker=".", ms=3)
+        ax.set_xlabel("epoch")
+        ax.set_ylabel("learning rate")
+        ax.set_title(run_dir.name)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        fig.savefig(run_dir / "plots" / "lr.png", dpi=120)
 
     def _append_run_record(self, rid, point, metrics):
         record = {"run_id": rid, "model": point["model"], **point["params"], **metrics}

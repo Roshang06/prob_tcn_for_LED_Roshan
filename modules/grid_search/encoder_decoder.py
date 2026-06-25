@@ -194,7 +194,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
 
         encoder.train()
         decoder.train()
-        history = {"loss": [], "ber": []}
+        history = {"loss": [], "ber": [], "lr": []}
         for _ in range(p["epochs"]):
             _, sent_time = self._sample_batch(batch_size, num_bits, ofdm_config)
             decoded_time = self._forward(encoder, decoder, channel_model, sent_time)
@@ -210,10 +210,16 @@ class EncoderDecoderGridSearch(GridSearchBase):
                 scheduler.step(loss.item())
             history["loss"].append(loss.item())
             history["ber"].append(self._test_ber(encoder, decoder, channel_model, ofdm_config, eval_bits, eval_sent_time))
+            history["lr"].append(optimizer.param_groups[0]["lr"])
 
         metrics = self._evaluate(encoder, decoder, channel_model, ofdm_config, num_bits, batch_size)
         metrics["num_params"] = encoder.get_num_params() + decoder.get_num_params()
         metrics["channel_run_id"] = point["channel_run_id"]
+
+        # propagate channel model metadata
+        ch_meta = self.channel_models[point["channel_run_id"]]
+        metrics["channel_receptive_field"] = ch_meta.get("receptive_field")
+        metrics["channel_distribution"] = ch_meta.get("distribution", "none")
 
         torch.save({"encoder": encoder.state_dict(), "decoder": decoder.state_dict()}, run_dir / "model.pt")
         self._write_history(run_dir, history)
@@ -221,7 +227,10 @@ class EncoderDecoderGridSearch(GridSearchBase):
         with torch.no_grad():
             sent_freq = self._frame_to_freq(eval_sent_time, ofdm_config)
             recv_freq = self._decode_freq(encoder.eval(), decoder.eval(), channel_model, eval_sent_time, ofdm_config)
-        self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz)
+            evm = evm_pct(sent_freq, recv_freq).item()
+        ch_model_type = f"TCN {ch_meta.get('distribution', 'none')}"
+        self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz,
+                                 channel_id=point["channel_run_id"], channel_type=ch_model_type, evm=evm)
         return metrics
 
     # ------------------------------------------------------------------- plots
@@ -238,21 +247,37 @@ class EncoderDecoderGridSearch(GridSearchBase):
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
         fig.savefig(run_dir / "plots" / "ber.png", dpi=120)
 
-    def _plot_constellation(self, run_dir, sent, received, freqs):
+    def _plot_constellation(self, run_dir, sent, received, freqs, channel_id=None, channel_type=None, evm=None):
         '''Sent vs received QPSK symbols on the active carriers, coloured by
-        carrier frequency (cf. experimental_blocks.PlotConstellations).'''
+        carrier frequency. Received plot overlays sent symbols as red X markers for reference.'''
         sent_np = sent.detach().cpu().numpy()
         recv_np = received.detach().cpu().numpy()
         # one frequency value per symbol, tiled across the batch to match ravel order
         c = np.tile(freqs.detach().cpu().numpy(), sent_np.shape[0])
-        sent_np, recv_np = sent_np.ravel(), recv_np.ravel()
+        sent_np_flat = sent_np.ravel()
+        recv_np_flat = recv_np.ravel()
 
         fig = Figure(figsize=(11, 5))
         ax_sent, ax_recv = fig.subplots(1, 2)
-        ax_sent.scatter(sent_np.real, sent_np.imag, s=10, c=c, cmap="viridis")
+        ax_sent.scatter(sent_np_flat.real, sent_np_flat.imag, s=10, c=c, cmap="viridis")
         ax_sent.set_title("Sent")
-        sc = ax_recv.scatter(recv_np.real, recv_np.imag, s=10, c=c, cmap="viridis")
-        ax_recv.set_title("Received")
+        sc = ax_recv.scatter(recv_np_flat.real, recv_np_flat.imag, s=10, c=c, cmap="viridis")
+        # overlay reference constellation symbols as red X's
+        ax_recv.scatter(sent_np_flat.real, sent_np_flat.imag, s=30, marker="x", c="red", linewidth=1.5, alpha=0.7, label="Reference")
+
+        title = "Received"
+        if channel_id or channel_type or evm is not None:
+            parts = []
+            if channel_id:
+                parts.append(channel_id)
+            if channel_type:
+                parts.append(channel_type)
+            if evm is not None:
+                parts.append(f"EVM={evm:.2f}%")
+            title = "Received (" + " | ".join(parts) + ")"
+        ax_recv.set_title(title)
+        ax_recv.legend(fontsize=8, loc="upper right")
+
         for ax in (ax_sent, ax_recv):
             ax.set_xlabel("In-Phase")
             ax.set_ylabel("Quadrature")

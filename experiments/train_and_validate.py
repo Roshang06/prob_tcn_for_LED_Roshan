@@ -55,7 +55,7 @@ if __name__ == "__main__":
         awg.set_output_load("INF")
         osc.display_channel(ch=1)
         osc.display_channel(ch=3)
-        osc.set_record_length(20_000)
+        osc.set_record_length(200_000)
         osc.set_trigger(ch=1, voltage_level=0)
         osc.set_probe_gain(ch=1, gain=1)
         osc.set_probe_gain(ch=3, gain=1)

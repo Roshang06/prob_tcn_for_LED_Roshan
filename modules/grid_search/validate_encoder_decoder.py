@@ -40,6 +40,8 @@ class EncoderDecoderValidation(GridSearchBase):
                    "params": {k: m["arch"][k] for k in ARCH_KEYS},
                    "channel_form": m["channel_form"],
                    "channel_run_id": m.get("channel_run_id"),
+                   "channel_receptive_field": m.get("channel_receptive_field"),
+                   "channel_distribution": m.get("channel_distribution", "none"),
                    "checkpoint": str(m["checkpoint"])}
                   for m in ed_models]
         super().__init__(points, {"ed_models": [m["run_id"] for m in ed_models]},
@@ -102,11 +104,17 @@ class EncoderDecoderValidation(GridSearchBase):
             "num_params": encoder.get_num_params() + decoder.get_num_params(),
             "channel_form": point["channel_form"],
             "channel_run_id": point.get("channel_run_id"),
+            "channel_receptive_field": point.get("channel_receptive_field"),
+            "channel_distribution": point.get("channel_distribution", "none"),
         }
 
         self._store_waveforms(run_dir.name, np.stack(sent_time), np.stack(recv_time), point["channel_form"])
+        channel_type = f"TCN {point.get('channel_distribution', 'none')}"
         label = f"{run_dir.name} | channel: {point['channel_form']}"
-        self._plot_constellation(run_dir, sent_syms[0], recv_syms[0], freqs, label)
+        self._plot_constellation(run_dir, sent_syms[0], recv_syms[0], freqs,
+                                 channel_id=point.get("channel_run_id"),
+                                 channel_type=channel_type,
+                                 evm=metrics["evm_pct"])
         self._plot_waveform(run_dir, example, label)
         return metrics
 
@@ -118,20 +126,34 @@ class EncoderDecoderValidation(GridSearchBase):
             za[:] = arr
         g.attrs["channel_form"] = channel_form
 
-    def _plot_constellation(self, run_dir, sent, received, freqs, label):
+    def _plot_constellation(self, run_dir, sent, received, freqs, channel_id=None, channel_type=None, evm=None):
         fig = Figure(figsize=(11, 5))
         ax_sent, ax_recv = fig.subplots(1, 2)
         ax_sent.scatter(sent.real, sent.imag, s=10, c=freqs, cmap="viridis")
         ax_sent.set_title("Sent")
         sc = ax_recv.scatter(received.real, received.imag, s=10, c=freqs, cmap="viridis")
-        ax_recv.set_title("Received")
+        # overlay reference constellation symbols as red X's
+        ax_recv.scatter(sent.real, sent.imag, s=30, marker="x", c="red", linewidth=1.5, alpha=0.7, label="Reference")
+
+        recv_title = "Received"
+        if channel_id or channel_type or evm is not None:
+            parts = []
+            if channel_id:
+                parts.append(channel_id)
+            if channel_type:
+                parts.append(channel_type)
+            if evm is not None:
+                parts.append(f"EVM={evm:.2f}%")
+            recv_title = "Received (" + " | ".join(parts) + ")"
+        ax_recv.set_title(recv_title)
+        ax_recv.legend(fontsize=8, loc="upper right")
+
         for ax in (ax_sent, ax_recv):
             ax.set_xlabel("In-Phase")
             ax.set_ylabel("Quadrature")
             ax.grid(True)
             ax.set_aspect("equal", "box")
         fig.colorbar(sc, ax=[ax_sent, ax_recv], label="Carrier Frequency (Hz)")
-        fig.suptitle(label)
         fig.savefig(run_dir / "plots" / "constellation.png", dpi=120)
 
     def _plot_waveform(self, run_dir, example, label):
@@ -190,11 +212,14 @@ def select_encoder_decoders(ed_exp_dir, channel_exp_dir=None, run_ids=None):
     selected = []
     for row in rows:
         rid = row["run_id"]
+        ch_meta = channel_map.get(row.get("channel_run_id"), {})
         selected.append({
             "run_id": rid,
             "arch": {k: row[k] for k in ARCH_KEYS},
             "checkpoint": ed_exp_dir / "runs" / rid / "model.pt",
             "channel_run_id": row.get("channel_run_id"),
-            "channel_form": derive_channel_form(channel_map.get(row.get("channel_run_id"))),
+            "channel_form": derive_channel_form(ch_meta),
+            "channel_receptive_field": ch_meta.get("receptive_field"),
+            "channel_distribution": ch_meta.get("distribution", "none"),
         })
     return selected

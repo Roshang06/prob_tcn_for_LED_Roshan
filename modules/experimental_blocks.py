@@ -185,7 +185,7 @@ class SendWaveform(ActionBlock):
             freq=self.freq,
             amplitude=self.amplitude,
             offset=self.offset)
-        time.sleep(1)
+        time.sleep(3)
         
 class MeasureWaveform(ResamplingBlock):
     def __init__(

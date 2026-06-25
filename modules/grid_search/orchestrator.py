@@ -133,6 +133,19 @@ class ChannelModelGridSearch(GridSearchBase):
                 metrics["val_nll"] = val_nll
         metrics["num_params"] = int(adapter.num_params())
 
+        # receptive field (TCN uses model attribute; GMP uses max memory + 1)
+        model_type = point["model"]
+        if model_type == "tcn":
+            metrics["receptive_field"] = int(adapter.model.receptive_field)
+        elif model_type == "gmp":
+            mem_lin = point["params"].get("memory_linear", 0)
+            mem_nonlin = point["params"].get("memory_nonlinear", 0)
+            metrics["receptive_field"] = max(mem_lin, mem_nonlin) + 1
+
+        # distribution (for GMP always "none"; for TCN track the learned noise type)
+        dist = point["params"].get("distribution", "none")
+        metrics["distribution"] = dist
+
         adapter.save(run_dir / "model.pt")
         self._write_history(run_dir, history)
         return metrics
@@ -179,5 +192,7 @@ def select_channel_models(exp_dir, mode="best", metric="val_rrmse_pct", run_ids=
             "model": row["model"],
             "params": params,
             "checkpoint": run_dir / "model.pt",
+            "receptive_field": row.get("receptive_field"),
+            "distribution": row.get("distribution", "none"),
         })
     return selected

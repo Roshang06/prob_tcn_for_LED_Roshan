@@ -136,7 +136,7 @@ class TCNAdapter:
             )
 
         self.model.train()
-        history = {"loss": []}
+        history = {"loss": [], "lr": []}
         if has_val:
             history["val_loss"] = []
         for _ in range(epochs):
@@ -150,6 +150,7 @@ class TCNAdapter:
                 n_batches += 1
             train_loss = epoch_loss / n_batches
             history["loss"].append(train_loss)
+            history["lr"].append(optimizer.param_groups[0]["lr"])
             if has_val:
                 val_loss = self._val_loss(X_val, Y_val)
                 history["val_loss"].append(val_loss)

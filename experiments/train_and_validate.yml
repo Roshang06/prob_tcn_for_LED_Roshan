@@ -8,8 +8,8 @@ RUNTIME:
 # ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/encoder_decoder_YYYYMMDD_HHMM
 
 
-# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/channel_models_20260623_0955
-# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/encoder_decoder_20260623_0959
+# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/full_ledge_channel_models_20260624_1710
+# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/full_ledge_encoder_decoder_20260624_1720
 HARDWARE_RESOURCES:
     Agilent_33250A:
         DRIVER_PATH: pyflux.hardware.drivers
@@ -24,18 +24,18 @@ DATA_COLLECTION:
   N: 2000 # Number of datapoints collected at the DC offset
   DC_OFFSETS: [0.122] # A (single offset per dataset)
   F_MINS: [300e3] # Hz
-  F_MAXS: [12.99e6] # Hz
-  OSC_SAMPLE_RATES: [62.5e6] # Hz
-  SUBCARRIER_SPACING: 1e4 # Hz
-  UPSAMPLE_FACTOR: 2
+  F_MAXS: [13e6] # Hz
+  OSC_SAMPLE_RATES: [500e6] # Hz
+  SUBCARRIER_SPACING: 100e3 # Hz
+  UPSAMPLE_FACTOR: 4
   AWG_TABLE_FRACTION: 0.5
   CP_LENGTH_FRACTION: 0.125
   PREAMBLE_LENGTH: 256
   MODULATION_FORMAT: "m7_apsk_constellation"
-  OSC_SCALE: 0.2
+  OSC_SCALE: 0.5 # V/div
   POWER_MIN: 0.5  # minimum symbol power
   POWER_MAX: 3.0  # maximum symbol power; at 3 the ±3 clip becomes apparent
-  DATASET_PATH: null
+  DATASET_PATH:
 
 CHANNEL_GRID_SEARCH:
   RECEPTIVE_FIELD: 20
