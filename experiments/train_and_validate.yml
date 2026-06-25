@@ -21,7 +21,7 @@ HARDWARE_RESOURCES:
         DRIVER_PATH: pyflux.hardware.drivers
         ID: HEWLETT-PACKARD,E3631A,0,1.6-5.0-1.0
 DATA_COLLECTION:
-  N: 5 # Number of datapoints collected at the DC offset
+  N: 2000 # Number of datapoints collected at the DC offset
   DC_OFFSETS: [0.122] # A (single offset per dataset)
   F_MINS: [300e3] # Hz
   F_MAXS: [12.99e6] # Hz
@@ -46,23 +46,23 @@ CHANNEL_GRID_SEARCH:
   models:
     - model: gmp
       params:
-        memory_linear: 12
-        memory_nonlinear: 12
-        nonlinearity_order: 3
-        cross_term_depth: [0, 2, 4]
+        memory_linear: 35
+        memory_nonlinear: 35
+        nonlinearity_order: [2, 3, 4]
+        cross_term_depth: [0, 2, 4, 6]
         ridge: 1.0e-3
 
     - model: tcn
       params:
-        nlayers: 2
-        hidden_channels: [4, 8]
-        kernel_size: 5
+        nlayers: [3]
+        hidden_channels: [4, 6, 8]
+        kernel_size: [6, 12]
         dilation_base: 2
         epochs: 20
         lr: 1.0e-3
         batch_size: 16
         factor: 0.5 # Learning rate scheduler
-        patience: 5
+        patience: 3
         min_lr: 1.0e-6
         distribution: ["none", "gaussian", "students_t"]
 
@@ -71,14 +71,14 @@ ENCODER_DECODER:
   PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to +-this
   PREAMBLE_IN_LOSS: true      # preamble is always in the burst; penalize it in the loss or not
   params:
-    nlayers: [2]
-    dilation_base: 2
-    kernel_size: 5
-    hidden_channels: 8
-    epochs: 600
+    nlayers: [3]
+    dilation_base: [3]
+    kernel_size: [16]
+    hidden_channels: [8]
+    epochs: 250
     lr: 1.0e-3
     weight_decay: 1.0e-5    # AdamW L2 regularization; 0 disables. List -> swept.
     batch_size: 16
     factor: 0.5 # Learning rate scheduler
-    patience: 5
+    patience: 3
     min_lr: 1.0e-6

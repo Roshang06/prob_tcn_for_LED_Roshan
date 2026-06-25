@@ -124,8 +124,7 @@ class ModulateDataOFDM(FunctionalBlock):
         time_domain_signal = np.fft.irfft(half_spectrum, n=self.baseband_fft_length, norm='ortho') # Use sinc interpolation for smooth analog waveform
 
         # Random power scaling: normalize to unit RMS then scale to U(power_min, power_max).
-        # Increases training diversity — higher powers drive the LED harder, making the
-        # hard clip at ±3 progressively more visible.
+        # Increases training diversity
         if self.power_min is not None and self.power_max is not None:
             rms = np.sqrt(np.mean(time_domain_signal ** 2)) + 1e-12
             target_power = np.random.uniform(self.power_min, self.power_max)
@@ -134,9 +133,6 @@ class ModulateDataOFDM(FunctionalBlock):
         cyclic_prefix = time_domain_signal[-self.cyclic_prefix_length:]
         time_domain_signal_with_cp = np.concatenate((cyclic_prefix, time_domain_signal))
 
-        # Band-limited ZC preamble (precomputed); clip the OFDM to the same +-3 so the
-        # preamble owns the global peak and normalizes to a constant height after the
-        # AWG's global normalization.
         preamble = self.preamble
         time_domain_signal_with_cp = np.clip(time_domain_signal_with_cp, -3, 3)
         baseband_burst = np.concatenate((preamble, time_domain_signal_with_cp))

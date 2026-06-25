@@ -34,7 +34,7 @@ EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
 
 SELECTED_CHANNEL_RUN_IDS = None  # None -> best per family; or ["tcn_xxxx", ...]
 SELECTED_ED_RUN_IDS = None       # None -> all E/D runs; or ["tcn_ae_xxxx", ...]
-VALIDATION_TRIALS = 5
+VALIDATION_TRIALS = 10
 
 MEASURED_A_OFFSET = 0.002        # stable current sits ~2 mA below the set point
 
@@ -140,9 +140,10 @@ if __name__ == "__main__":
 
         # 3. select channel models ----------------------------------------------
         best_channels = select_channel_models(
-            channel_exp_dir, mode="best", run_ids=SELECTED_CHANNEL_RUN_IDS)
+            channel_exp_dir, mode="all", run_ids=SELECTED_CHANNEL_RUN_IDS)
         for cm in best_channels:
-            print(f"  channel {cm['model']:4s}  run={cm['run_id']}")
+            dist = cm["params"].get("distribution", "none")
+            print(f"  channel {cm['model']:4s}  dist={dist:12s}  run={cm['run_id']}")
 
         # 4. encoder/decoder grid search (or reuse existing) -------------------
         ed_exp_dir_override = getattr(Exp.config, 'ENCODER_DECODER_EXP_DIR', None)
