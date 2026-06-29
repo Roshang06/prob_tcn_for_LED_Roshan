@@ -1,5 +1,15 @@
 """
-fit a ridge FIR to a zarr dataset and diagnose channel memory length.
+Diagnose channel memory from a zarr dataset and recommend receptive-field tap counts.
+
+Everything is computed from the IN-BAND channel (per-carrier H_k), which is the only part
+the data actually constrains, then converted to taps at the dataset's own sample rate. The
+broadband time-domain FIR's tap count is deliberately NOT reported: it is dominated by
+out-of-band extrapolation and inflates at lower oversampling (see git history).
+
+Prints:
+  * channel memory (taps)        - in-band group-delay dispersion x fs
+  * recommended channel-model RF - must reproduce the channel
+  * recommended encoder/decoder RF - must invert it (longer; from the channel's dominant zero)
 """
 import sys
 from pathlib import Path
@@ -12,11 +22,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────────
-DATASET_PATH = "data/sweeps/dc0.122A_fmin300000_fmax1.299e+07_20260623_1752.zarr"
-L            = 128    # FIR tap count
+DATASET_PATH = "data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260626_1835.zarr"
+L            = 128    # FIR tap count used only to extract the channel's dominant zero
 VAL_FRACTION = 0.2
 RIDGE        = 1e-3
-INV_ENERGY_LOSS = 1e-2  # tolerated relative tail-energy loss for the equalizer estimate
+INV_ENERGY_LOSS = 1e-2  # tolerated tail-energy loss for the equalizer-length estimate (99%)
+MARGIN       = 2.0      # safety factor applied to the raw tap counts for the RF recommendation
 PLOT_PATH    = HERE.parent / "data/plots"
 # ────────────────────────────────────────────────────────────────────────────────
 
@@ -32,10 +43,10 @@ def load(dataset_path):
     else:
         x = root["sent_baseband"][:]
         y = root["received_baseband"][:]
-    ks         = np.array(attrs["active_carrier_indices"])
+    ks = np.array(attrs["active_carrier_indices"])
     spacing_hz = float(attrs.get("f_min_hz", 300e3)) / ks[0]
-    fs         = x.shape[1] * spacing_hz
-    return x.astype(np.float32), y.astype(np.float32), fs
+    fs = x.shape[1] * spacing_hz
+    return x.astype(np.float32), y.astype(np.float32), fs, ks
 
 
 def build_design(frames, L):
@@ -48,123 +59,123 @@ def build_design(frames, L):
 
 
 def inversion_taps(rho, e):
-    """
-    Estimate the equalizer length needed to invert a minimum-phase channel.
-
-    The min-phase inverse decays as rho^n where rho = max|zero|, so the energy
-    left in the tail beyond N taps is e = rho^(2N). Solving for N:
-
-        N = ln(e) / (2 ln(rho))
-
-    rho : dominant zero magnitude (must be < 1; >= 1 => non-min-phase, no
-          convergent causal inverse).
-    e   : tolerated relative tail-energy loss (e.g. 1e-2 for 99%).
-    """
+    """Equalizer length to invert a minimum-phase channel: the inverse decays as rho^n,
+    so tail energy beyond N taps is e = rho^(2N) -> N = ln(e)/(2 ln rho). rho = dominant
+    zero magnitude (<1 for a convergent causal inverse)."""
     if rho >= 1.0:
         return float("inf")
     return np.log(e) / (2 * np.log(rho))
 
 
+def inband_channel(x, y, fs, ks):
+    """Per-carrier in-band channel H_k = <Y_k,X_k>/<X_k,X_k> (LS over bursts), free of the
+    out-of-band extrapolation that dominates a time-domain FIR. Returns H_k, the active
+    frequencies, the soft-band-limited impulse response (for plotting), and the in-band
+    group-delay dispersion in ns (the real memory an equaliser must undo)."""
+    Nfft = x.shape[1]
+    X = np.fft.rfft(x, axis=1)
+    Y = np.fft.rfft(y, axis=1)
+    Hk = np.zeros(X.shape[1], dtype=complex)
+    Hk[ks] = (Y * np.conj(X)).sum(0)[ks] / np.maximum((np.abs(X) ** 2).sum(0)[ks], 1e-12)
+    f_hz = np.fft.rfftfreq(Nfft, 1.0 / fs)
+    binhz = fs / Nfft
+
+    # group-delay span = -dphase/domega across the band; smooth phase with a low-order
+    # polynomial first so per-bin noise on fine carrier grids doesn't inflate the gradient
+    ph = np.unwrap(np.angle(Hk[ks]))
+    ph_s = np.polyval(np.polyfit(f_hz[ks], ph, deg=min(6, len(ks) - 1)), f_hz[ks])
+    gd_ns = -np.gradient(ph_s, 2 * np.pi * binhz) * 1e9
+    gd_span = float(gd_ns.max() - gd_ns.min())
+
+    # soft-tapered band-limited impulse response (for the plot only)
+    win = np.zeros_like(Hk, dtype=float)
+    k0, k1 = int(ks[0]), int(ks[-1])
+    win[k0:k1 + 1] = 1.0
+    n_edge = max(1, int(0.08 * (k1 - k0)))
+    ramp = 0.5 * (1 - np.cos(np.linspace(0, np.pi, n_edge)))
+    win[k0:k0 + n_edge] *= ramp
+    win[k1 - n_edge + 1:k1 + 1] *= ramp[::-1]
+    h_bl = np.fft.fftshift(np.fft.irfft(Hk * win, n=Nfft))
+
+    nlo = max(1, len(ks) // 5)
+    lo = float(np.abs(Hk[ks[:nlo]]).mean())
+    hi = float(np.abs(Hk[ks[-nlo:]]).mean())
+    return dict(Hk=Hk, f_hz=f_hz, h_bl=h_bl, gd_span_ns=gd_span, lo=lo, hi=hi)
+
+
+def channel_zero(x, y):
+    """Dominant zero magnitude rho of the channel main lobe, and the linear-fit RRMSE.
+    A ridge FIR is fit then TRUNCATED to the real channel memory before taking roots, so
+    the out-of-band-extrapolation tail cannot inflate rho."""
+    n_val = max(1, int(len(x) * VAL_FRACTION))
+    X_tr = build_design(x[:-n_val], L)
+    t_tr = np.concatenate([row[L - 1:] for row in y[:-n_val]])
+    A = X_tr.T @ X_tr + RIDGE * np.eye(L)
+    h = np.linalg.solve(A.astype(np.float64), (X_tr.T @ t_tr).astype(np.float64))
+    X_val = build_design(x[-n_val:], L)
+    t_val = np.concatenate([row[L - 1:] for row in y[-n_val:]])
+    rrmse = float(np.sqrt(np.mean((t_val - X_val @ h) ** 2) / np.mean(t_val ** 2)) * 100)
+    return h, rrmse
+
+
 def main():
     PLOT_PATH.mkdir(parents=True, exist_ok=True)
-    x, y, fs = load(DATASET_PATH)
+    x, y, fs, ks = load(DATASET_PATH)
     Ts_ns = 1e9 / fs
+    Nfft = x.shape[1]
+    f_min, f_max = ks[0] * fs / Nfft, ks[-1] * fs / Nfft
 
-    n_val = max(1, int(len(x) * VAL_FRACTION))
-    x_tr, y_tr = x[:-n_val], y[:-n_val]
-    x_val, y_val = x[-n_val:], y[-n_val:]
+    ib = inband_channel(x, y, fs, ks)
+    rolloff = ib["hi"] / ib["lo"]
 
-    X_tr = build_design(x_tr, L)
-    t_tr = np.concatenate([row[L - 1:] for row in y_tr])
+    # channel memory: in-band dispersion converted to taps at THIS sample rate
+    channel_taps = max(1, int(np.ceil(ib["gd_span_ns"] / Ts_ns)))
 
-    # ridge least squares: h = (X^T X + λI)^{-1} X^T y
-    A = X_tr.T @ X_tr + RIDGE * np.eye(L, dtype=np.float64)
-    b = X_tr.T @ t_tr
-    h = np.linalg.solve(A.astype(np.float64), b.astype(np.float64))
+    # equalizer length: invert the channel's dominant zero (from the truncated main lobe)
+    h, rrmse = channel_zero(x, y)
+    roots = np.roots(h[:max(channel_taps, 2)])
+    rho = float(np.abs(roots).max()) if roots.size else 0.0
+    eq_taps = int(np.ceil(inversion_taps(rho, INV_ENERGY_LOSS))) if rho < 1.0 else None
 
-    # validation RRMSE
-    X_val = build_design(x_val, L)
-    t_val = np.concatenate([row[L - 1:] for row in y_val])
-    y_hat = X_val @ h
-    rrmse = np.sqrt(np.mean((t_val - y_hat) ** 2) / np.mean(t_val ** 2)) * 100
+    rf_channel = int(np.ceil(channel_taps * MARGIN))
+    rf_ed = int(np.ceil(eq_taps * MARGIN)) if eq_taps else None
 
-    energy     = h ** 2
-    cum_energy = np.cumsum(energy) / energy.sum()
-    lags_ns    = np.arange(L) * Ts_ns
-
-    m95 = int(np.searchsorted(cum_energy, 0.95))
-    m99 = int(np.searchsorted(cum_energy, 0.99))
-    print(f"Val RRMSE : {rrmse:.3f}%")
-    print(f"95% energy: tap {m95}  ({lags_ns[min(m95, L-1)]:.1f} ns)")
-    print(f"99% energy: tap {m99}  ({lags_ns[min(m99, L-1)]:.1f} ns)")
-
-    # minimum-phase test: roots (zeros) of the FIR polynomial H(z) = sum h[k] z^-k.
-    # Truncate to the 99%-energy span first — the ridge-regularized tail is noise
-    # and would otherwise spawn spurious zeros near the unit circle.
-    h_sig = h[:max(m99 + 1, 2)]
-    roots = np.roots(h_sig)            # zeros of H(z) in the z-plane
-    max_radius = float(np.abs(roots).max()) if roots.size else 0.0
-    is_min_phase = max_radius < 1.0
-    n_outside = int((np.abs(roots) > 1.0).sum())
-    print(f"FIR zeros: {roots.size} (from {h_sig.size} taps), "
-          f"max |root| = {max_radius:.4f}")
-    print(f"Minimum phase: {is_min_phase}  ({n_outside} zero(s) outside unit circle)")
-
-    n_inv = inversion_taps(max_radius, INV_ENERGY_LOSS)
-    if np.isfinite(n_inv):
-        print(f"Equalizer taps for {(1 - INV_ENERGY_LOSS) * 100:.0f}% inversion "
-              f"energy (rho={max_radius:.4f}): {n_inv:.1f} taps "
-              f"({n_inv * Ts_ns:.1f} ns)")
+    print(f"dataset      : {Path(DATASET_PATH).name}")
+    print(f"sample rate  : {fs / 1e6:.1f} MHz   (Ts = {Ts_ns:.2f} ns/tap)")
+    print(f"band         : {f_min / 1e6:.2f} - {f_max / 1e6:.2f} MHz")
+    print(f"in-band |H|  : {ib['lo']:.2f} -> {ib['hi']:.2f}  ({rolloff:.2f}x rolloff)"
+          f"   linear-fit RRMSE {rrmse:.1f}%")
+    print("-" * 60)
+    print(f"channel memory (in-band)      : {channel_taps:4d} taps  ({ib['gd_span_ns']:.0f} ns)")
+    print(f"recommended channel-model RF  : {rf_channel:4d} taps   (memory x{MARGIN:g})")
+    if rf_ed:
+        print(f"recommended encoder/decoder RF: {rf_ed:4d} taps   "
+              f"(equalizer {eq_taps} taps x{MARGIN:g}, channel zero rho={rho:.2f})")
     else:
-        print("Non-minimum phase: no convergent causal inverse "
-              "(equalizer needs bulk delay + anti-causal taps)")
+        print("recommended encoder/decoder RF: channel non-minimum-phase (rho>=1) — "
+              "needs bulk delay + anti-causal taps")
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    # one figure: the real in-band channel and its impulse response
+    fig, (axA, axB) = plt.subplots(1, 2, figsize=(11, 4))
+    axA.plot(ib["f_hz"][ks] / 1e6, 20 * np.log10(np.abs(ib["Hk"][ks]) + 1e-12), "C0.-", ms=3)
+    axA.set_xlabel("Frequency (MHz)")
+    axA.set_ylabel("|H_k| (dB)")
+    axA.set_title(f"In-band channel ({rolloff:.1f}x rolloff)")
+    axA.grid(True, alpha=0.3)
 
-    ax1.stem(lags_ns, h, markerfmt="C0o", linefmt="C0-", basefmt="k-")
-    ax1.set_xlabel("Lag (ns)")
-    ax1.set_ylabel("Tap weight")
-    ax1.set_title(f"FIR Impulse Response  L={L},  ridge={RIDGE}")
-    ax1.grid(True)
-
-    ax2.plot(lags_ns, cum_energy, "C1-")
-    ax2.axhline(0.95, color="gray", linestyle="--", linewidth=0.8)
-    ax2.axhline(0.99, color="gray", linestyle=":",  linewidth=0.8)
-    if m95 < L:
-        ax2.axvline(lags_ns[m95], color="C2", linestyle="--", alpha=0.8,
-                    label=f"95%: {lags_ns[m95]:.0f} ns (tap {m95})")
-    if m99 < L:
-        ax2.axvline(lags_ns[m99], color="C3", linestyle=":",  alpha=0.8,
-                    label=f"99%: {lags_ns[m99]:.0f} ns (tap {m99})")
-    ax2.set_xlabel("Lag (ns)")
-    ax2.set_ylabel("Cumulative Energy Fraction")
-    ax2.set_title("Cumulative FIR Energy")
-    ax2.legend()
-    ax2.grid(True)
-
-    plt.tight_layout()
-    plt.savefig(PLOT_PATH / "fir_analysis.png", bbox_inches="tight")
-    plt.savefig(PLOT_PATH / "fir_analysis.svg", format="svg", bbox_inches="tight")
-
-    # z-plane: FIR zeros vs the unit circle (inside = minimum phase)
-    fig2, ax3 = plt.subplots(figsize=(5, 5))
-    theta = np.linspace(0, 2 * np.pi, 400)
-    ax3.plot(np.cos(theta), np.sin(theta), "k-", linewidth=0.8)
-    inside  = np.abs(roots) < 1.0
-    ax3.scatter(roots[inside].real,  roots[inside].imag,  marker="o",
-                facecolors="none", edgecolors="C0", label="inside (min-phase)")
-    ax3.scatter(roots[~inside].real, roots[~inside].imag, marker="x",
-                color="C3", label="outside (non-min-phase)")
-    ax3.set_xlabel("Real")
-    ax3.set_ylabel("Imag")
-    ax3.set_title(f"FIR Zeros (z-plane)  max|root|={max_radius:.3f}")
-    ax3.set_aspect("equal")
-    ax3.grid(True)
-    ax3.legend()
-
-    fig2.tight_layout()
-    fig2.savefig(PLOT_PATH / "fir_zeros.png", bbox_inches="tight")
-    fig2.savefig(PLOT_PATH / "fir_zeros.svg", format="svg", bbox_inches="tight")
+    peak = int(np.argmax(np.abs(ib["h_bl"])))
+    tb = (np.arange(len(ib["h_bl"])) - peak) * Ts_ns
+    axB.plot(tb, ib["h_bl"], "C1-")
+    axB.set_xlim(-channel_taps * Ts_ns * 4, channel_taps * Ts_ns * 4)
+    axB.axvspan(-ib["gd_span_ns"] / 2, ib["gd_span_ns"] / 2, color="C2", alpha=0.15,
+                label=f"memory ~{channel_taps} taps")
+    axB.set_xlabel("Lag (ns)")
+    axB.set_ylabel("Amplitude")
+    axB.set_title("In-band impulse response")
+    axB.grid(True, alpha=0.3)
+    axB.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(PLOT_PATH / "fir_channel.png", bbox_inches="tight")
     plt.show()
 
 

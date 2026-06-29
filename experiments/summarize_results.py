@@ -35,9 +35,9 @@ RUN_CONFIGS = [
     {
         "label": "121mA",
         "dc_ma": 121,
-        "channel_exp_dir": "data/experiments/train_and_validate/fleet_flare_channel_models_20260623_2332",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/fleet_flare_ed_validation_20260623_2349",
-        "dataset_path":    "data/sweeps/dc0.122A_fmin300000_fmax1.299e+07_20260623_1752.zarr",
+        "channel_exp_dir": "data/experiments/train_and_validate/amber_plain_channel_models_20260626_0245",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/amber_plain_ed_validation_20260626_0258",
+        "dataset_path":    "data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260625_1419.zarr",
     },
     # add more DC offsets here, e.g.:
     # {
@@ -309,10 +309,10 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
         ax.grid(True)
         ax.text(0.05, 0.95, _PANEL_LABELS[idx], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
+        ax.tick_params(labelbottom=True)
         if idx % 2 == 0:
             ax.set_ylabel("Val RRMSE (%)")
-        if idx >= 2:
-            ax.set_xlabel("Sent Power (Mean Squared Amplitude)")
+        ax.set_xlabel("Sent Power (Mean Squared Amplitude)")
 
     axes_flat[0].legend(fontsize=_FONT, handlelength=3, labelspacing=0.5)
 
@@ -390,10 +390,10 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
         ax.grid(True)
         ax.text(0.05, 0.95, _PANEL_LABELS[idx], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
+        ax.tick_params(labelbottom=True)
         if idx % 2 == 0:
             ax.set_ylabel("Experimental EVM (%)")
-        if idx >= 2:
-            ax.set_xlabel("Channel Model Parameter Count")
+        ax.set_xlabel("Channel Model Parameter Count")
 
     axes_flat[0].legend(fontsize=_SMALL, handlelength=2, markerscale=0.8,
                         labelspacing=0.3, borderpad=0.4)

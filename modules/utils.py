@@ -254,7 +254,7 @@ def in_band_filter(x, ks_indices, nfft):
     filtered_x = F.conv1d(x.unsqueeze(1), h, padding='same').squeeze(1)
     return filtered_x
 
-def in_band_time_loss(sent_time, decoded_time, ks_indices, n_fft, kernel_size=None):
+def in_band_time_loss(sent_time, decoded_time, ks_indices, n_fft):
     """In-band loss computed directly in the frequency domain.
 
     Compares sent and decoded signals only on the active subcarrier bins,

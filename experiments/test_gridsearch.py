@@ -136,7 +136,6 @@ CHANNEL_GRID = {
 ENCODER_DECODER_GRID = {
     "constellation":      "qpsk",
     "preamble_amplitude": 3.0,
-    "preamble_in_loss":   False,   # preamble is always in the burst; penalize it or not
     "params": {
         "nlayers":         [2],
         "dilation_base":   2,

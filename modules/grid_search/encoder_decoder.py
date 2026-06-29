@@ -45,8 +45,6 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self.constellation = get_constellation(grid_config["constellation"])
         self.preamble_amplitude = float(grid_config["preamble_amplitude"])
         self.preamble_length = preamble_length
-        # preamble is always in the burst; this only controls whether it's penalized
-        self.preamble_in_loss = bool(grid_config.get("preamble_in_loss", True))
 
         ed_points = expand_grid([{"model": "tcn_ae", "params": grid_config["params"]}])
         points = [{**p, "channel_run_id": run_id} for p in ed_points for run_id in self.channel_models]
@@ -117,10 +115,15 @@ class EncoderDecoderGridSearch(GridSearchBase):
         return torch.tensor(true_bits, device=self.device), sent_time
 
     def _forward(self, encoder, decoder, channel_model, sent_time):
-        encoded_time = encoder(sent_time).clamp(-self.preamble_amplitude, self.preamble_amplitude)
-        channel_out = channel_model(encoded_time)
-        received_time = channel_out[0] if isinstance(channel_out, tuple) else channel_out
-        return decoder(received_time)
+        # encode, pass through the channel, and decode only the OFDM symbol (CP + payload);
+        # the preamble is never processed
+        pre = self.preamble_length
+        preamble, symbol = sent_time[:, :pre], sent_time[:, pre:]
+        encoded_symbol = encoder(symbol).clamp(-self.preamble_amplitude, self.preamble_amplitude)
+        channel_out = channel_model(encoded_symbol)
+        received_symbol = channel_out[0] if isinstance(channel_out, tuple) else channel_out
+        decoded_symbol = decoder(received_symbol)
+        return torch.hstack((preamble, decoded_symbol))
 
     def _frame_to_freq(self, time_frame, ofdm_config):
         '''
@@ -198,10 +201,10 @@ class EncoderDecoderGridSearch(GridSearchBase):
         for _ in range(p["epochs"]):
             _, sent_time = self._sample_batch(batch_size, num_bits, ofdm_config)
             decoded_time = self._forward(encoder, decoder, channel_model, sent_time)
-            # optionally exclude the preamble region from the loss (decoder still sees it)
-            offset = 0 if self.preamble_in_loss else self.preamble_length
+            # loss on the OFDM symbol only; the preamble is never encoded/decoded
+            offset = self.preamble_length
             loss = in_band_time_loss(sent_time[:, offset:], decoded_time[:, offset:],
-                                     ofdm_config.active_carrier_indices, ofdm_config.baseband_fft_length, p["kernel_size"])
+                                     ofdm_config.active_carrier_indices, ofdm_config.baseband_fft_length)
 
             optimizer.zero_grad()
             loss.backward()

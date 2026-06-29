@@ -30,7 +30,7 @@ ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels")
 class EncoderDecoderValidation(GridSearchBase):
     def __init__(self, ed_models, ofdm_blocks, num_trials, constellation, clip_value,
                  device="cpu", seed=0, experiments_dir=None, experiment_name="ed_validation",
-                 run_prefix=None):
+                 run_prefix=None, debug=False):
         self.ofdm_blocks = ofdm_blocks  # (modulate, send, measure, resample, demod)
         self.num_trials = num_trials
         self.constellation = constellation
@@ -49,6 +49,7 @@ class EncoderDecoderValidation(GridSearchBase):
                          experiment_name, run_prefix=run_prefix,
                          extra_manifest={"num_trials": num_trials})
         self.rank_by = "evm_pct"
+        self.debug = debug
 
     def _prepare(self):
         self.val_group = zarr.open_group(self.exp_dir / "validation.zarr", mode="a")
@@ -75,7 +76,7 @@ class EncoderDecoderValidation(GridSearchBase):
         chain = Chain([modulate,
                        ApplyEncoder(encoder, modulate, self.clip_value, self.device),
                        send, measure, resample,
-                       ApplyDecoder(decoder, demod, self.device),
+                       ApplyDecoder(decoder, demod, self.device, debug=self.debug),
                        demod])
 
         sent_syms, recv_syms, true_bits, sent_time, recv_time = [], [], [], [], []
@@ -83,6 +84,13 @@ class EncoderDecoderValidation(GridSearchBase):
         for i in range(self.num_trials):
             x = chain.run(Signal(data=np.zeros(1), sampling_rate=modulate.fs_out))
             art = x.artifact_container
+
+            if self.debug:
+                print(f"trial {i + 1}/{self.num_trials}  sent={art['sent_symbols'].shape} "
+                      f"recv={art['received_symbols'].shape} "
+                      f"sent_time={art['sent_baseband'].shape} "
+                      f"recv_time={x.data.shape}")
+                
             sent_syms.append(np.asarray(art["sent_symbols"]))
             recv_syms.append(np.asarray(art["received_symbols"]))
             true_bits.append(self._bits(art["source_bits"]))
@@ -92,6 +100,7 @@ class EncoderDecoderValidation(GridSearchBase):
             if i == 0:
                 example = {k: np.asarray(art[k]) for k in
                            ("encoder_input", "encoder_output", "decoder_input", "decoder_output")}
+                example["decoder_window"] = art.get("decoder_window")
 
         example["residual"] = sent_time[0] - recv_time[0]  # in-band sent vs recovered symbol
 
@@ -109,9 +118,10 @@ class EncoderDecoderValidation(GridSearchBase):
         }
 
         self._store_waveforms(run_dir.name, np.stack(sent_time), np.stack(recv_time), point["channel_form"])
-        channel_type = f"TCN {point.get('channel_distribution', 'none')}"
+        dist = point.get("channel_distribution", "none")
+        channel_type = point["channel_form"] + (f" ({dist})" if dist not in ("none", None) else "")
         label = f"{run_dir.name} | channel: {point['channel_form']}"
-        self._plot_constellation(run_dir, sent_syms[0], recv_syms[0], freqs,
+        self._plot_constellation(run_dir, sent_syms, recv_syms, freqs,
                                  channel_id=point.get("channel_run_id"),
                                  channel_type=channel_type,
                                  evm=metrics["evm_pct"])
@@ -127,24 +137,32 @@ class EncoderDecoderValidation(GridSearchBase):
         g.attrs["channel_form"] = channel_form
 
     def _plot_constellation(self, run_dir, sent, received, freqs, channel_id=None, channel_type=None, evm=None):
+        sent = np.asarray(sent)
+        received = np.asarray(received)
+        freqs = np.asarray(freqs)
+        n_rows = sent.shape[0] if sent.ndim > 1 else 1
+        c = np.tile(freqs, n_rows)
+        sent_flat, recv_flat = sent.ravel(), received.ravel()
+
         fig = Figure(figsize=(11, 5))
         ax_sent, ax_recv = fig.subplots(1, 2)
-        ax_sent.scatter(sent.real, sent.imag, s=10, c=freqs, cmap="viridis")
+        ax_sent.scatter(sent_flat.real, sent_flat.imag, s=10, c=c, cmap="viridis")
         ax_sent.set_title("Sent")
-        sc = ax_recv.scatter(received.real, received.imag, s=10, c=freqs, cmap="viridis")
+        sc = ax_recv.scatter(recv_flat.real, recv_flat.imag, s=10, c=c, cmap="viridis")
         # overlay reference constellation symbols as red X's
-        ax_recv.scatter(sent.real, sent.imag, s=30, marker="x", c="red", linewidth=1.5, alpha=0.7, label="Reference")
+        ax_recv.scatter(sent_flat.real, sent_flat.imag, s=30, marker="x", c="red", linewidth=1.5, alpha=0.7, label="Reference")
 
         recv_title = "Received"
         if channel_id or channel_type or evm is not None:
             parts = []
-            if channel_id:
-                parts.append(channel_id)
-            if channel_type:
-                parts.append(channel_type)
+            # the channel model this E/D was trained against
+            ch = " ".join(p for p in (channel_type, channel_id) if p)
+            if ch:
+                parts.append(f"channel: {ch}")
             if evm is not None:
                 parts.append(f"EVM={evm:.2f}%")
-            recv_title = "Received (" + " | ".join(parts) + ")"
+            # second line keeps the details clear of the colour bar on the right
+            recv_title = "Received\n(" + " | ".join(parts) + ")"
         ax_recv.set_title(recv_title)
         ax_recv.legend(fontsize=8, loc="upper right")
 
@@ -157,17 +175,23 @@ class EncoderDecoderValidation(GridSearchBase):
         fig.savefig(run_dir / "plots" / "constellation.png", dpi=120)
 
     def _plot_waveform(self, run_dir, example, label):
+        # mark=True rows are the full received capture; the decoder only touches the
+        # synced symbol window, so draw red lines at its bounds on those panels.
         rows = [
-            ("encoder input", example["encoder_input"]),
-            ("encoder output", example["encoder_output"]),
-            ("decoder input", example["decoder_input"]),
-            ("decoder output", example["decoder_output"]),
-            ("residual (sent - recovered symbol)", example["residual"]),
+            ("encoder input", example["encoder_input"], False),
+            ("encoder output", example["encoder_output"], False),
+            ("decoder input", example["decoder_input"], True),
+            ("decoder output", example["decoder_output"], True),
+            ("residual (sent - recovered symbol)", example["residual"], False),
         ]
+        window = example.get("decoder_window")
         fig = Figure(figsize=(9, 11))
         axes = fig.subplots(len(rows), 1)
-        for ax, (title, signal) in zip(axes, rows):
+        for ax, (title, signal, mark) in zip(axes, rows):
             ax.plot(signal, lw=1)
+            if mark and window is not None:
+                for bound in window:
+                    ax.axvline(bound, color="red", lw=1.0)
             ax.set_ylabel(title, fontsize=8)
             ax.grid(True, alpha=0.3)
         axes[-1].set_xlabel("Sample index")

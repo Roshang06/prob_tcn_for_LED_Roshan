@@ -34,7 +34,7 @@ EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
 
 SELECTED_CHANNEL_RUN_IDS = None  # None -> best per family; or ["tcn_xxxx", ...]
 SELECTED_ED_RUN_IDS = None       # None -> all E/D runs; or ["tcn_ae_xxxx", ...]
-VALIDATION_TRIALS = 10
+VALIDATION_TRIALS = 20
 
 MEASURED_A_OFFSET = 0.002        # stable current sits ~2 mA below the set point
 
@@ -42,7 +42,7 @@ MEASURED_A_OFFSET = 0.002        # stable current sits ~2 mA below the set point
 if __name__ == "__main__":
     RUN_NAME = generate_run_name()
 
-    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE) as Exp:
+    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME) as Exp:
         cfg = Exp.config.DATA_COLLECTION
         device = Exp.config.RUNTIME.DEVICE
         seed = int(Exp.config.RUNTIME.SEED)
@@ -75,6 +75,8 @@ if __name__ == "__main__":
         pwr_supply.enable_output()
         Exp.log(f"DC offset set to {dc_offset_A - MEASURED_A_OFFSET:.3f} A")
 
+        check_channel = CheckChannel(awg_driver=awg, osc_driver=osc, data_channel=3)
+
         mod_ofdm = ModulateDataOFDM(
             constellation=get_constellation("qpsk"),
             f_min=min_freq, f_max=max_freq,
@@ -86,6 +88,7 @@ if __name__ == "__main__":
             preamble_length=cfg.PREAMBLE_LENGTH,
             power_min=getattr(cfg, 'POWER_MIN', None),
             power_max=getattr(cfg, 'POWER_MAX', None),
+            jitter_power=getattr(cfg, 'JITTER_POWER', 0.0),
         )
 
         f_AWG = mod_ofdm.awg_frequency
@@ -97,7 +100,7 @@ if __name__ == "__main__":
             fs_in=mod_ofdm.fs_out, fs_out=osc_fs, osc_driver=osc,
             input_signal_frequency=f_AWG, trigger_channel=1, data_channel=3, debug=False)
         resample_waveform = ResampleMeasuredWaveform(
-            fs_in=osc_fs, fs_out=mod_ofdm.baseband_sampling_rate)
+            fs_in=osc_fs, fs_out=mod_ofdm.baseband_sampling_rate, debug=False)
         demod_ofdm = DemodulateDataOFDM(
             constellation=get_constellation("qpsk"),
             f_min=min_freq, f_max=max_freq, subcarrier_spacing=subcarrier_spacing,
@@ -106,7 +109,15 @@ if __name__ == "__main__":
             cyclic_prefix_length=mod_ofdm.cyclic_prefix_length,
             upsample_factor=cfg.UPSAMPLE_FACTOR, debug=False)
 
-        # 1. gather (or reuse) the dataset --------------------------------------
+        def _restore_ofdm_scope():
+            osc.set_record_length(200_000)
+            osc.set_horizontal_scale(0.2 / f_AWG)
+            osc.configure_channel(ch=3, scale=cfg.OSC_SCALE, offset=0)
+
+        check_channel.run("start")
+        _restore_ofdm_scope()
+
+        # 1. gather the dataset
         dataset_path = getattr(cfg, 'DATASET_PATH', None) or None
         if dataset_path is None:
             append_to_dataset = AppendToDataset(
@@ -127,7 +138,12 @@ if __name__ == "__main__":
         else:
             Exp.log(f"reusing existing dataset at {dataset_path}")
 
-        # 2. channel-model grid search (or reuse existing) ---------------------
+        mod_ofdm.jitter_power = 0.0  # collection done; validation transmits clean symbols
+        mod_ofdm.power_min = mod_ofdm.power_max = None  # no random power scaling/clip in validation; natural symbol power matches E/D training
+
+        check_channel.run("post-collection")
+
+        # 2. channel-model grid search
         channel_exp_dir_override = getattr(Exp.config, 'CHANNEL_EXP_DIR', None)
         if channel_exp_dir_override:
             channel_exp_dir = Path(channel_exp_dir_override)
@@ -138,14 +154,14 @@ if __name__ == "__main__":
                 dataset_path=dataset_path, run_prefix=RUN_NAME)
             channel_exp_dir = channel_gs.run()
 
-        # 3. select channel models ----------------------------------------------
+        # 3. select channel models
         best_channels = select_channel_models(
             channel_exp_dir, mode="all", run_ids=SELECTED_CHANNEL_RUN_IDS)
         for cm in best_channels:
             dist = cm["params"].get("distribution", "none")
             print(f"  channel {cm['model']:4s}  dist={dist:12s}  run={cm['run_id']}")
 
-        # 4. encoder/decoder grid search (or reuse existing) -------------------
+        # 4. encoder/decoder grid search
         ed_exp_dir_override = getattr(Exp.config, 'ENCODER_DECODER_EXP_DIR', None)
         if ed_exp_dir_override:
             ed_exp_dir = Path(ed_exp_dir_override)
@@ -157,11 +173,14 @@ if __name__ == "__main__":
                 dataset_path=dataset_path, run_prefix=RUN_NAME)
             ed_exp_dir = ed_gs.run(ofdm_config=OFDMConfig.from_modulator(mod_ofdm))
 
-        # 5. select E/D models and validate on the live channel -----------------
+        # 5. select E/D models and validate on the live channel
         ed_models = select_encoder_decoders(
             ed_exp_dir, channel_exp_dir=channel_exp_dir, run_ids=SELECTED_ED_RUN_IDS)
         for m in ed_models:
             print(f"  E/D {m['run_id']}  channel_form={m['channel_form']}")
+
+        check_channel.run("pre-validation")
+        _restore_ofdm_scope()
 
         validation = EncoderDecoderValidation(
             ed_models,
@@ -170,12 +189,12 @@ if __name__ == "__main__":
             constellation=get_constellation("qpsk"),
             clip_value=float(Exp.config.ENCODER_DECODER.PREAMBLE_AMPLITUDE),
             device=device, seed=seed, experiments_dir=EXP_DIR, experiment_name="ed_validation",
-            run_prefix=RUN_NAME)
+            run_prefix=RUN_NAME, debug=False)
         val_exp_dir = validation.run()
+        check_channel.run("post-validation")
 
-        # summary ----------------------------------------------------------------
         print("\n" + "=" * 60)
-        print(f"Results summary — DC offset {dc_offset_A - MEASURED_A_OFFSET:.3f} A")
+        print(f"Results summary: DC offset {dc_offset_A - MEASURED_A_OFFSET:.3f} A")
         print("=" * 60)
         for label, summary_dir in [("channel", channel_exp_dir),
                                    ("encoder/decoder", ed_exp_dir),

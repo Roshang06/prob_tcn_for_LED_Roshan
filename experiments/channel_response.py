@@ -4,7 +4,7 @@ dataset and plot magnitude + unwrapped phase (with a linear-delay fit / residual
 split) to separate LPF dispersion from symbol-timing offset.
 
 Edit CONFIG at the top, then:
-    cd <repo_root>/experiments
+    cd <repo_root>/experimentsp
     python channel_response.py
 """
 import sys
@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────────
-DATASET_PATH = "data/sweeps/dc0.122A_fmin300000_fmax1.299e+07_20260623_1752.zarr"
+DATASET_PATH = "data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260625_1419.zarr"
 PLOT_PATH    = HERE.parent / "data/plots"
 # ────────────────────────────────────────────────────────────────────────────────
 

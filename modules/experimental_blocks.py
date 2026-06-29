@@ -68,6 +68,7 @@ class ModulateDataOFDM(FunctionalBlock):
                  preamble_length: int = 256,
                  power_min: float = None,
                  power_max: float = None,
+                 jitter_power: float = 0.0,
                  ):
         self.AWG_TABLE_LENGTH = 16_384
         self.output_length = int(self.AWG_TABLE_LENGTH * awg_table_fraction)
@@ -101,6 +102,7 @@ class ModulateDataOFDM(FunctionalBlock):
 
         self.power_min = power_min
         self.power_max = power_max
+        self.jitter_power = jitter_power
         self.preamble = self._build_preamble()
 
     def _build_preamble(self):
@@ -116,6 +118,12 @@ class ModulateDataOFDM(FunctionalBlock):
     def transform(self, x:Signal) -> Signal:
         source_bits = generate_random_bits(self.bits_per_symbol * self.num_carriers)
         active_subcarriers = self.constellation.bits_to_symbols(source_bits)
+
+        # Off-constellation jitter for channel-model training richness
+        if self.jitter_power:
+            jitter = np.sqrt(self.jitter_power / 2) * (
+                np.random.randn(self.num_carriers) + 1j * np.random.randn(self.num_carriers))
+            active_subcarriers = active_subcarriers + jitter
 
         # Place carriers in a fixed-length half spectrum (DC, leading bins, and all
         # bins above f_max stay zero) and irfft to a fixed-length real symbol.
@@ -209,9 +217,16 @@ class MeasureWaveform(ResamplingBlock):
 
     def resample(self, x: Signal) -> Signal:
         timesteps, voltages = self.driver.measure_waveform(channel=self.data_channel)
+        true_fs = 1.0 / float(np.mean(np.diff(timesteps)))
+        if not np.isclose(true_fs, self.fs_out, rtol=1e-3):
+            raise ValueError(
+                f"MeasureWaveform: scope's true sample rate {true_fs:.6g} Hz (from xincr) "
+                f"does not match declared fs_out {self.fs_out:.6g} Hz."
+            )
         x.sampling_rate = self.fs_out
         x.data = voltages
         if self.debug:
+            print(f"MeasureWaveform: measured {len(voltages)} samples at {true_fs:.2e} Hz (expected {self.fs_out:.2e} Hz)")
             plt.figure()
             plt.plot(timesteps, voltages)
             plt.title("MeasureWaveform: measured waveform")
@@ -221,17 +236,22 @@ class MeasureWaveform(ResamplingBlock):
         return x
             
 class ResampleMeasuredWaveform(ResamplingBlock):
-    def __init__(self, fs_in, fs_out):
+    def __init__(self, fs_in, fs_out, debug=False):
         super().__init__(fs_in, fs_out)
+        self.debug = debug
 
     def resample(self, x: Signal) -> Signal:
         # Estimate up and down with rational fraction
+        original_len = len(x.data)
         frac = Fraction(self.fs_out / self.fs_in).limit_denominator(1000)
         up = frac.numerator
         down = frac.denominator
         resampled_data = resample_poly(x.data, up, down)
         x.data = resampled_data
         x.sampling_rate = self.fs_out
+        if self.debug:
+            print(f"ResampleMeasuredWaveform: resampled from {self.fs_in:.2e} Hz to {self.fs_out:.2e} Hz "
+                  f"using up={up}, down={down}, resulting in length change of {original_len} to {len(resampled_data)}samples")
         return x
 
 class DemodulateDataOFDM(FunctionalBlock):
@@ -257,20 +277,22 @@ class DemodulateDataOFDM(FunctionalBlock):
         self.subcarrier_indicies = np.round(self.subcarrier_freqs_hz / subcarrier_spacing).astype(int)
         self.debug = debug
 
-    def transform(self, x:Signal) -> Signal:
-        preamble = x.artifact_container['preamble']
-        y_t = x.data
+    def find_preamble_start(self, y_t, preamble, chosen_peak_index=0):
         corr = correlate(y_t, preamble, mode='valid')
         peaks, _ = find_peaks(corr, height=0.95 * np.max(np.abs(corr)), distance=len(preamble))
         if len(peaks) == 0:
             raise ValueError("Preamble not found in received signal")
-        
         needed = self.ofdm_symbol_length_with_cp
         valid = [p for p in peaks if p + len(preamble) + needed <= len(y_t)]
         if not valid:
             raise ValueError(f"No preamble has a full OFDM symbol after it: capture holds "
                             f"{len(y_t)} samples, need {needed} after each preamble. Widen the scope window.")
-        preamble_start = valid[0]
+        return valid[chosen_peak_index], corr, peaks
+
+    def transform(self, x:Signal) -> Signal:
+        preamble = x.artifact_container['preamble']
+        y_t = x.data
+        preamble_start, corr, peaks = self.find_preamble_start(y_t, preamble)
         if self.debug:
             plt.figure()
             plt.plot(corr)
@@ -334,14 +356,15 @@ class SendAndReceiveOFDM(Chain):
 
 class ApplyEncoder(FunctionalBlock):
     '''
-    Insert a frozen encoder after modulation: pre-distort the whole burst (preamble
-    included) so it shares the encoder's group delay with the payload, then rebuild the
-    AWG waveform. Output is clamped to +-clip_value.
+    Insert a frozen encoder after modulation: pre-distort only the OFDM symbol
+    (CP + payload) and re-prepend the pristine preamble, so hardware sync correlates
+    against an untouched template. Then rebuild the AWG waveform, clamped to +-clip_value.
     '''
     def __init__(self, encoder, modulate_block: ModulateDataOFDM, clip_value: float, device="cpu"):
         super().__init__(modulate_block.fs_out)
         self.encoder = encoder
         self.output_length = modulate_block.output_length
+        self.preamble_length = modulate_block.preamble_length
         self.clip_value = clip_value
         self.device = device
 
@@ -352,7 +375,9 @@ class ApplyEncoder(FunctionalBlock):
 
     def transform(self, x: Signal) -> Signal:
         burst = np.array(x.data, copy=True)
-        encoded = np.clip(self._apply(burst), -self.clip_value, self.clip_value)
+        preamble, symbol = burst[:self.preamble_length], burst[self.preamble_length:]
+        encoded_symbol = np.clip(self._apply(symbol), -self.clip_value, self.clip_value)
+        encoded = np.concatenate((preamble, encoded_symbol))
         x.data = encoded
         x.artifact_container['awg_waveform'] = np.clip(resample(encoded, self.output_length),
                                                        -self.clip_value, self.clip_value)
@@ -362,14 +387,16 @@ class ApplyEncoder(FunctionalBlock):
 
 
 class ApplyDecoder(FunctionalBlock):
-    '''Insert a frozen decoder before demodulation: equalize the whole received stream
-    so the encoder/channel/decoder link is transparent, then let demod sync + demodulate
-    the cleaned signal normally. The preamble is already band-limited (see
-    ModulateDataOFDM), so the in-band equalizer preserves it and sync needs no extra step.'''
-    def __init__(self, decoder, demodulate_block: DemodulateDataOFDM, device="cpu"):
+    '''Insert a frozen decoder before demodulation: sync on the pristine preamble in the
+    raw received stream, equalize only the OFDM symbol (CP + payload), and splice it back
+    so demod re-syncs on the untouched preamble and demodulates normally. Sync therefore
+    never depends on the encoder/decoder.'''
+    def __init__(self, decoder, demodulate_block: DemodulateDataOFDM, device="cpu", debug=False):
         super().__init__(demodulate_block.fs_in)
         self.decoder = decoder
+        self.demod = demodulate_block
         self.device = device
+        self.debug = debug
 
     def _apply(self, signal):
         t = torch.tensor(signal, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -378,10 +405,19 @@ class ApplyDecoder(FunctionalBlock):
 
     def transform(self, x: Signal) -> Signal:
         received = np.array(x.data, copy=True)
-        decoded = self._apply(received)
+        preamble = x.artifact_container['preamble']
+        preamble_start, _, _ = self.demod.find_preamble_start(received, preamble)
+        symbol_start = preamble_start + len(preamble)
+        symbol_end = symbol_start + self.demod.ofdm_symbol_length_with_cp
+        if self.debug:
+            print(f"ApplyDecoder: received {len(received)} samples, symbol [{symbol_start}:{symbol_end}]")
+        decoded_symbol = self._apply(received[symbol_start:symbol_end])
+        decoded = received.copy()
+        decoded[symbol_start:symbol_end] = decoded_symbol
         x.data = decoded
         x.artifact_container['decoder_input'] = received
         x.artifact_container['decoder_output'] = decoded
+        x.artifact_container['decoder_window'] = (symbol_start, symbol_end)
         return x
 
 
@@ -452,3 +488,42 @@ class AppendToDataset(ActionBlock):
         for name, row in fields.items():
             self._arrays[name].append(row[None, :])
         return x
+
+
+class CheckChannel:
+    _PROBE_HZ = 1e6
+    _DRIVE_VPP = 2.0
+    _N_AVG = 128
+    _RECORD_LEN = 20_000
+    _PERIODS = 4
+    _MEAS_SLOT = 1
+    _MEAS_TYPE = "RMS"
+    SLEEP_TIME = 3.0 # Ensure the average has long enough to settle before measuring the waveform
+
+    def __init__(self, awg_driver, osc_driver, data_channel):
+        self.awg = awg_driver
+        self.osc = osc_driver
+
+        self.data_channel = data_channel
+
+    def run(self, label=""):
+        self.awg.apply_output_fun(
+            waveform="SIN", frequency=self._PROBE_HZ,
+            amplitude=self._DRIVE_VPP, offset=0.0)
+        self.osc.set_record_length(self._RECORD_LEN)
+        self.osc.set_horizontal_scale(self._PERIODS / (10.0 * self._PROBE_HZ))
+        # _, v = self.osc.measure_waveform(channel=self.data_channel)
+        # pkpk0 = float(np.ptp(v))
+        # self.osc.configure_channel(ch=self.data_channel, scale=max(pkpk0 / 8.0, 1e-3), offset=0)
+        self.osc.set_acquire_mode("AVErage", self._N_AVG)
+        self.osc.resume_acquire()  # must be actively acquiring for the average to accumulate
+        self.osc.select_measurement(self._MEAS_SLOT, self.data_channel, self._MEAS_TYPE)
+        time.sleep(self.SLEEP_TIME)
+        vrms = self.osc.read_measurement(self._MEAS_SLOT)
+        mode = self.osc.get_acquire_mode()
+        self.osc.set_acquire_mode("SAMple")
+        self.osc.resume_acquire()
+        prefix = f"[{label}] " if label else ""
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[check_channel {ts}] {prefix}1 MHz V{self._MEAS_TYPE.lower()} = {vrms:.4f} V  ({self._N_AVG}-avg, mode={mode})")
+        return vrms

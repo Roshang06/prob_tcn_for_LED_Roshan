@@ -97,7 +97,10 @@ class ChannelModelGridSearch(GridSearchBase):
         if data is not None:
             sent, received = data
         else:
-            sent, received, _ = load_ofdm_dataset(str(self.dataset_path), self.device)
+            sent, received, config = load_ofdm_dataset(str(self.dataset_path), self.device)
+            # channel model trains on the OFDM symbol only (CP + payload); drop the preamble
+            preamble_length = sent.shape[1] - config.baseband_fft_length - config.cyclic_prefix_length
+            sent, received = sent[:, preamble_length:], received[:, preamble_length:]
         return self._split_train_val(sent, received)
 
     def _split_train_val(self, X, Y):
@@ -114,7 +117,13 @@ class ChannelModelGridSearch(GridSearchBase):
         y_pred = adapter.predict(X)
         if isinstance(y_pred, tuple):  # TCN learn_noise: (noisy, mean, std, nu)
             y_pred = y_pred[1]
-        return {"rrmse_pct": calculate_rrmse_pct_loss(Y.to(y_pred.device), y_pred)}
+        Y = Y.to(y_pred.device)
+        # keep rRMSE consistent with training: when warm-up is excluded from the loss,
+        # exclude it from the metric too
+        if getattr(adapter, "exclude_warmup", False):
+            s = adapter._warmup_slice(y_pred.shape[-1])
+            y_pred, Y = y_pred[..., s:], Y[..., s:]
+        return {"rrmse_pct": calculate_rrmse_pct_loss(Y, y_pred)}
 
     # ----------------------------------------------------------------- run
     def _run_point(self, point, run_dir, context) -> dict:
