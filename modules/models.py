@@ -37,7 +37,7 @@ class ABC_time_model(nn.Module):
         return outputs
 
 class TCNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation, nonCausalPadding=0):
         super().__init__()
         self.conv = nn.Conv1d(
             in_channels,
@@ -46,14 +46,15 @@ class TCNBlock(nn.Module):
             dilation=dilation,
             padding=0
         )
-        self.padding = (kernel_size - 1) * dilation
+        self.nonCausalPadding = nonCausalPadding
+        self.padding = (kernel_size - 1) * dilation - nonCausalPadding
         self.relu = nn.ReLU()
         self.resample = None
         if in_channels != out_channels:
             self.resample = nn.Conv1d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
-        out = F.pad(x, (self.padding, 0))
+        out = F.pad(x, (self.padding, self.nonCausalPadding))
         out = self.conv(out)
         out = self.relu(out)
         if self.resample:
@@ -61,14 +62,14 @@ class TCNBlock(nn.Module):
         return out + x # residual connection
 
 class TCN(nn.Module):
-    def __init__(self, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32):
+    def __init__(self, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32, nonCausalPadding=0):
         super().__init__()
         layers = []
         in_channels = 1
         for i in range(nlayers):
             dilation = dilation_base ** i
             layers.append(
-                TCNBlock(in_channels, hidden_channels, num_taps, dilation)
+                TCNBlock(in_channels, hidden_channels, num_taps, dilation, nonCausalPadding)
             )
             in_channels = hidden_channels
         self.tcn = nn.Sequential(*layers)

@@ -1,6 +1,6 @@
 '''
 Synthetic end-to-end test of the channel model and encoder/decoder grid searches.
-No hardware, no zarr dataset — all data is generated here.
+No hardware, no zarr dataset — all data is generated here.  
 
 Run from the repo root:
     python experiments/test_gridsearch.py
@@ -118,6 +118,7 @@ ENCODER_DECODER_GRID = {
         "lr":              1e-3,
         "weight_decay":    1e-5,
         "batch_size":      8,
+        "nonCausalPadding": [0, 1, 4]
     },
 }
 

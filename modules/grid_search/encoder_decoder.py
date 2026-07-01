@@ -20,9 +20,9 @@ from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
 from modules.models import TCN
 from modules.utils import (calculate_BER, calculate_rrmse_pct_loss, in_band_time_loss,
-                           load_ofdm_dataset, symbols_to_time)
+                           load_ofdm_dataset, symbols_to_time, correlation)
 
-ARCH_KEYS = ("nlayers", "dilation_base", "num_taps", "hidden_channels")
+ARCH_KEYS = ("nlayers", "dilation_base", "num_taps", "hidden_channels", "nonCausalPadding")
 
 
 class EncoderDecoderGridSearch(GridSearchBase):
@@ -139,6 +139,52 @@ class EncoderDecoderGridSearch(GridSearchBase):
             encoder.train(); decoder.train()
         ber = calculate_BER(recv_freq.flatten(), true_bits.flatten(), constellation=self.constellation)
         return {"ber": ber, "rrmse_pct": calculate_rrmse_pct_loss(sent_freq, recv_freq)}
+    
+    def _plot_delay_correlation(self, run_dir, sent_time, decoded_time, lag_max=40):
+        '''Cross-correlation between sent and decoded time signals. A causal
+        encoder/decoder/channel chain will show its peak at a positive lag,
+        not lag 0 — that offset is the group delay in_band_time_loss never
+        corrects for.'''
+        with torch.no_grad():
+            corr = correlation(sent_time, decoded_time, lag_max).squeeze(-1).cpu().numpy()
+        lags = np.arange(-lag_max, lag_max + 1)
+        peak_lag = int(lags[np.argmax(np.abs(corr))])
+
+        fig = Figure(figsize=(7, 4))
+        ax = fig.subplots()
+        ax.plot(lags, corr, marker=".", ms=3)
+        ax.axvline(0, color="gray", lw=1, ls="--")
+        ax.axvline(peak_lag, color="r", lw=1, ls="--", label=f"peak lag={peak_lag}")
+        ax.set_xlabel("lag (samples)")
+        ax.set_ylabel("normalized correlation")
+        ax.set_title(f"{run_dir.name} — sent/decoded cross-correlation")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        fig.savefig(run_dir / "plots" / "delay_correlation.png", dpi=120)
+        return peak_lag
+
+    def _plot_position_error(self, run_dir, sent_time, decoded_time, cp_len):
+        '''Per-timestep squared error, aligned to the CP boundary. If error is
+        concentrated in the first N samples after the CP, that's boundary
+        zero-padding contamination bleeding past the guard interval — not a
+        global reconstruction quality issue.'''
+        with torch.no_grad():
+            err = (sent_time - decoded_time).pow(2).mean(dim=0).cpu().numpy()  # [T]
+
+        fig = Figure(figsize=(8, 4))
+        ax = fig.subplots()
+        ax.plot(err)
+        ax.axvline(cp_len, color="r", lw=1, ls="--", label="CP boundary (scoring starts here)")
+        ax.set_xlabel("time index (0 = start of CP)")
+        ax.set_ylabel("mean squared error")
+        ax.set_title(f"{run_dir.name} — error vs position in frame")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        fig.savefig(run_dir / "plots" / "position_error.png", dpi=120)
 
     def _run_point(self, point, run_dir, context) -> dict:
         ofdm_config, channel_models = context
@@ -182,8 +228,11 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self._plot_ber(run_dir, history["ber"])
         with torch.no_grad():
             sent_freq = self._frame_to_freq(eval_sent_time, ofdm_config)
+            decoded_time_eval = self._forward(encoder.eval(), decoder.eval(), channel_model, eval_sent_time)
             recv_freq = self._decode_freq(encoder.eval(), decoder.eval(), channel_model, eval_sent_time, ofdm_config)
         self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz)
+        self._plot_delay_correlation(run_dir, eval_sent_time, decoded_time_eval)
+        self._plot_position_error(run_dir, eval_sent_time, decoded_time_eval, ofdm_config.cyclic_prefix_length)
         return metrics
 
     # ------------------------------------------------------------------- plots
