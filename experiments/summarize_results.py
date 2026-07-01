@@ -35,9 +35,9 @@ RUN_CONFIGS = [
     {
         "label": "121mA",
         "dc_ma": 121,
-        "channel_exp_dir": "data/experiments/train_and_validate/amber_plain_channel_models_20260626_0245",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/amber_plain_ed_validation_20260626_0258",
-        "dataset_path":    "data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260625_1419.zarr",
+        "channel_exp_dir": "data/experiments/train_and_validate/north_trail_channel_models_20260630_1315",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/north_trail_ed_validation_20260630_1340",
+        "dataset_path":    "data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260628_1234.zarr",
     },
     # add more DC offsets here, e.g.:
     # {
@@ -53,7 +53,6 @@ PLOT_PATH       = Path(__file__).resolve().parent.parent / "data/plots"
 DEVICE          = "cpu"
 N_POWER_BINS    = 10       # bins for plot 1
 MAX_QQ_SAMPLES  = 10_000  # downsample for Q-Q speed
-SQUARE_WAVE_HZ  = 1e6     # frequency of the square wave in plot 4
 # ────────────────────────────────────────────────────────────────────────────────
 
 
@@ -232,11 +231,13 @@ def _binned_rrmse(
     centers = (0.5 * (bins[:-1] + bins[1:])).cpu().numpy()
 
     Y_hat = _predict_mean(adapter, X)
+    rf = int(getattr(adapter.model, "receptive_field", 0))
+    Y_t, Y_hat = Y[..., rf:], Y_hat[..., rf:]
     vals = []
     for i in range(n_bins):
         mask = bin_ids == i
         if mask.any():
-            vals.append(float(calculate_rrmse_pct_loss(Y[mask], Y_hat[mask])))
+            vals.append(float(calculate_rrmse_pct_loss(Y_t[mask], Y_hat[mask])))
         else:
             vals.append(float("nan"))
     return centers, np.array(vals)
@@ -487,17 +488,17 @@ def plot_qq(run_configs: list[dict]) -> None:
     plt.show()
 
 
-# ─── PLOT 4: TCN predicted response to square wave (lowest DC bias) ─────────────
+# ─── PLOT 4: TCN predicted response to a Gaussian wave packet (lowest DC bias) ──
 
-def plot_square_wave(run_configs: list[dict]) -> None:
+def plot_packet_response(run_configs: list[dict]) -> None:
     cfg = min(run_configs, key=lambda c: c["dc_ma"])
 
     runs = load_channel_runs(cfg["channel_exp_dir"])
     prob_runs = [r for r in runs if r["is_prob"]]
     if not prob_runs:
-        print(f"[plot_square_wave] No prob TCN found for {cfg['label']}; skipping.")
+        print(f"[plot_packet_response] No prob TCN found for {cfg['label']}; skipping.")
         return
-    best = _best_by(prob_runs, "val_rrmse_pct")
+    best = _best_by(prob_runs, "val_nll", fallback_key="val_rrmse_pct")
 
     adapter = load_adapter(best, cfg["channel_exp_dir"])
     model = adapter.model
@@ -517,26 +518,43 @@ def plot_square_wave(run_configs: list[dict]) -> None:
         sym_len = root["sent_baseband"].shape[1]
     fs = sym_len * spacing_hz   # baseband sampling rate in Hz
 
-    n_samples = 8000
-    t = torch.arange(n_samples, dtype=torch.float32)
-    x_sq = torch.sign(torch.sin(2 * torch.pi * SQUARE_WAVE_HZ / fs * t))
-    x_sq = ((x_sq + 1.0) / 2.0) * 6.0 - 3.0   # {-1,1} → {-3, +3}
-    x_sq = x_sq.unsqueeze(0)   # [1, n_samples]
+    # In-distribution test input: a Gaussian-shaped magnitude spectrum over the
+    # active OFDM band (f_min..f_max), zero phase, with the +/-3 sigma points landing
+    # on the band edges. Its IFFT is a smooth Gaussian wave packet that occupies the
+    # same band the channel model was trained on, so it stays fully in-distribution.
+    rf = int(model.receptive_field)
+    carriers = np.arange(sym_len // 2 + 1)
+    k_lo, k_hi = int(ks.min()), int(ks.max())
+    k_c   = 0.5 * (k_lo + k_hi)          # band-centre carrier
+    sig_k = (k_hi - k_lo) / 6.0          # 3 sigma reaches each band edge
+    in_band = (carriers >= k_lo) & (carriers <= k_hi)
+    spectrum = np.zeros(sym_len // 2 + 1, dtype=complex)
+    spectrum[in_band] = np.exp(-0.5 * ((carriers[in_band] - k_c) / sig_k) ** 2)
+    packet = np.fft.irfft(spectrum, n=sym_len)
+    packet = np.roll(packet, sym_len // 2)          # centre the packet within each period
+    packet *= 3.0 / np.abs(packet).max()            # scale peak to the +/-3 training range
+
+    reps      = max(1, int(np.ceil(rf / sym_len))) + 2   # enough periods for full RF context
+    n_samples = reps * sym_len
+    x_in = torch.tensor(np.tile(packet, reps), dtype=torch.float32).unsqueeze(0)
 
     dev = next(model.parameters()).device
     with torch.no_grad():
-        _, mean, std, nu = model(x_sq.to(dev))
+        _, mean, std, nu = model(x_in.to(dev))
 
+    # zoom to a window around one packet (past the receptive field), packet centre at t=0
     ns_per_sample = 1e9 / fs
-    t_ns = t.numpy() * ns_per_sample
-    rf   = model.receptive_field
-    n_window = max(int(3000 / ns_per_sample), 10)
-    sl, sr = rf, min(rf + n_window, n_samples)
+    r0     = max(1, int(np.ceil(rf / sym_len)))
+    centre = r0 * sym_len + sym_len // 2
+    sig_t  = sym_len / (2 * np.pi * sig_k)      # packet envelope width in samples
+    half_w = int(np.ceil(6 * sig_t))            # +/-6 sigma around the packet
+    sl, sr = centre - half_w, centre + half_w
+    t_ns = (np.arange(n_samples) - centre) * ns_per_sample
 
     mean_np = mean.squeeze(0).cpu().numpy()
     std_np  = std.squeeze(0).cpu().numpy()
     nu_np   = nu.squeeze(0).cpu().numpy()
-    x_np    = x_sq.squeeze(0).numpy()
+    x_np    = x_in.squeeze(0).numpy()
     is_gaussian = best.get("distribution", "gaussian") == "gaussian"
 
     cmap = _CMAP
@@ -564,21 +582,42 @@ def plot_square_wave(run_configs: list[dict]) -> None:
     ax2.set_zorder(0)
     ax2.grid(True, alpha=0.3)
     ax2.plot(t_ns[sl:sr], x_np[sl:sr], "--", color="black", alpha=0.8, label="Input Signal")
-    ax2.set_ylabel("Normalized Input Signal Amplitude", color="black")
+    ax2.set_ylabel("Input Signal Amplitude", color="black")
     ax2.tick_params(axis="y", labelcolor="black")
 
     h1, l1 = ax1.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
     ax1.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=_SMALL,
                frameon=True, framealpha=1)
-    freq_khz = int(SQUARE_WAVE_HZ / 1e3)
-    ax1.set_title(f"TCN Response – {freq_khz} kHz Square Wave – {cfg['label']}",
+    ax1.set_title(f"TCN Response – Gaussian Wave Packet – {cfg['label']}",
                   fontsize=_FONT)
 
     plt.tight_layout()
-    plt.savefig(PLOT_PATH / "square_wave_response.svg", format="svg", bbox_inches="tight")
-    plt.savefig(PLOT_PATH / "square_wave_response.png", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / "packet_response.svg", format="svg", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / "packet_response.png", bbox_inches="tight")
     plt.show()
+
+
+# ─── GMP ERR: term ranking for the best GMP model at each DC bias ───────────────
+
+def print_best_gmp_err(run_configs: list[dict]) -> None:
+    """Grab the best-performing GMP channel model (lowest val RRMSE) at each DC bias
+    and print its error-reduction-ratio (ERR) term ranking + linear/nonlinear split."""
+    for cfg in run_configs:
+        gmp_runs = [r for r in load_channel_runs(cfg["channel_exp_dir"]) if r["model"] == "gmp"]
+        if not gmp_runs:
+            print(f"\n[{cfg['label']}] no GMP model found; skipping ERR.")
+            continue
+        best = _best_by(gmp_runs, "val_rrmse_pct", fallback_key="rrmse_pct")
+        score = best.get("val_rrmse_pct", best.get("rrmse_pct"))
+        print("\n" + "=" * 50)
+        print(f"GMP ERR — {cfg['label']}  (run {best['run_id']}, val RRMSE {score:.2f}%)")
+        try:
+            adapter = load_adapter(best, cfg["channel_exp_dir"])
+            X, Y, _, _ = load_dataset(cfg["dataset_path"])
+            adapter.model.calculate_err(X, Y, plot=True)
+        except Exception as e:
+            print(f"  ERR calculation failed: {e}")
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────────
@@ -595,7 +634,10 @@ if __name__ == "__main__":
     print("Plot 3 – Q-Q plots for best prob TCN ...")
     plot_qq(run_configs)
 
-    print("Plot 4 – Square wave TCN response ...")
-    plot_square_wave(run_configs)
+    print("Plot 4 – Gaussian wave packet TCN response ...")
+    plot_packet_response(run_configs)
+
+    print("\nBest GMP ERR term ranking per DC bias ...")
+    print_best_gmp_err(run_configs)
 
     print(f"\nDone. Figures saved to {PLOT_PATH}/")

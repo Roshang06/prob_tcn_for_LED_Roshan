@@ -118,12 +118,11 @@ class EncoderDecoderValidation(GridSearchBase):
         }
 
         self._store_waveforms(run_dir.name, np.stack(sent_time), np.stack(recv_time), point["channel_form"])
-        dist = point.get("channel_distribution", "none")
-        channel_type = point["channel_form"] + (f" ({dist})" if dist not in ("none", None) else "")
         label = f"{run_dir.name} | channel: {point['channel_form']}"
         self._plot_constellation(run_dir, sent_syms, recv_syms, freqs,
-                                 channel_id=point.get("channel_run_id"),
-                                 channel_type=channel_type,
+                                 ed_run_id=run_dir.name,
+                                 channel_form=point["channel_form"],
+                                 channel_run_id=point.get("channel_run_id"),
                                  evm=metrics["evm_pct"])
         self._plot_waveform(run_dir, example, label)
         return metrics
@@ -136,7 +135,8 @@ class EncoderDecoderValidation(GridSearchBase):
             za[:] = arr
         g.attrs["channel_form"] = channel_form
 
-    def _plot_constellation(self, run_dir, sent, received, freqs, channel_id=None, channel_type=None, evm=None):
+    def _plot_constellation(self, run_dir, sent, received, freqs, ed_run_id=None,
+                            channel_form=None, channel_run_id=None, evm=None):
         sent = np.asarray(sent)
         received = np.asarray(received)
         freqs = np.asarray(freqs)
@@ -151,19 +151,7 @@ class EncoderDecoderValidation(GridSearchBase):
         sc = ax_recv.scatter(recv_flat.real, recv_flat.imag, s=10, c=c, cmap="viridis")
         # overlay reference constellation symbols as red X's
         ax_recv.scatter(sent_flat.real, sent_flat.imag, s=30, marker="x", c="red", linewidth=1.5, alpha=0.7, label="Reference")
-
-        recv_title = "Received"
-        if channel_id or channel_type or evm is not None:
-            parts = []
-            # the channel model this E/D was trained against
-            ch = " ".join(p for p in (channel_type, channel_id) if p)
-            if ch:
-                parts.append(f"channel: {ch}")
-            if evm is not None:
-                parts.append(f"EVM={evm:.2f}%")
-            # second line keeps the details clear of the colour bar on the right
-            recv_title = "Received\n(" + " | ".join(parts) + ")"
-        ax_recv.set_title(recv_title)
+        ax_recv.set_title("Received" if evm is None else f"Received (EVM={evm:.2f}%)")
         ax_recv.legend(fontsize=8, loc="upper right")
 
         for ax in (ax_sent, ax_recv):
@@ -172,6 +160,10 @@ class EncoderDecoderValidation(GridSearchBase):
             ax.grid(True)
             ax.set_aspect("equal", "box")
         fig.colorbar(sc, ax=[ax_sent, ax_recv], label="Carrier Frequency (Hz)")
+        channel = " ".join(p for p in (channel_form, channel_run_id) if p)
+        suptitle = " | ".join(p for p in (ed_run_id, f"channel: {channel}" if channel else "") if p)
+        if suptitle:
+            fig.suptitle(suptitle)
         fig.savefig(run_dir / "plots" / "constellation.png", dpi=120)
 
     def _plot_waveform(self, run_dir, example, label):
@@ -206,11 +198,13 @@ def _read_jsonl(path):
 def derive_channel_form(record) -> str:
     '''Human-readable channel model family for plot labels, from a channel-grid
     runs.jsonl record: "gmp", "prob TCN" (learns noise) or "nonprob TCN".'''
-    model = (record or {}).get("model")
+    rec = record or {}
+    model = rec.get("model")
     if model == "gmp":
         return "gmp"
     if model == "tcn":
-        return "prob TCN" if record.get("learn_noise") else "nonprob TCN"
+        dist = rec.get("distribution", "none")
+        return "prob TCN" if dist not in ("none", None) else "nonprob TCN"
     return model or "unknown"
 
 

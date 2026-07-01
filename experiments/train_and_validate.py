@@ -34,7 +34,7 @@ EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
 
 SELECTED_CHANNEL_RUN_IDS = None  # None -> best per family; or ["tcn_xxxx", ...]
 SELECTED_ED_RUN_IDS = None       # None -> all E/D runs; or ["tcn_ae_xxxx", ...]
-VALIDATION_TRIALS = 20
+VALIDATION_TRIALS = 10
 
 MEASURED_A_OFFSET = 0.002        # stable current sits ~2 mA below the set point
 

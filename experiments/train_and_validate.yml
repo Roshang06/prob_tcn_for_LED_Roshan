@@ -8,8 +8,8 @@ RUNTIME:
 # ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/encoder_decoder_YYYYMMDD_HHMM
 
 
-CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/azure_vault_channel_models_20260629_0713
-ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/azure_vault_encoder_decoder_20260629_0738
+# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/azure_vault_channel_models_20260629_0713
+# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/azure_vault_encoder_decoder_20260629_0738
 HARDWARE_RESOURCES:
     Agilent_33250A:
         DRIVER_PATH: pyflux.hardware.drivers
@@ -43,7 +43,7 @@ DATA_COLLECTION:
 CHANNEL_GRID_SEARCH:
   RECEPTIVE_FIELD: 20
   VAL_FRACTION: 0.2
-  EXCLUDE_WARMUP: true       # drop the first receptive_field samples (causal warm-up,
+  EXCLUDE_WARMUP: false       # drop the first receptive_field samples (causal warm-up,
                              # zero-padded context) from the channel-model loss AND rRMSE.
                             
   # SELECTED_RUN_IDS:        # optional: pin exactly which channel runs advance to the
@@ -52,19 +52,19 @@ CHANNEL_GRID_SEARCH:
   models:
     - model: gmp
       params:
-        memory_linear: 11
-        memory_nonlinear: 11
+        memory_linear: 49
+        memory_nonlinear: 49
         nonlinearity_order: [3, 4]
-        cross_term_depth: [2, 4, 6]
+        cross_term_depth: [2, 16]
         ridge: 1.0e-3
 
     - model: tcn
       params:
-        nlayers: [2]
-        hidden_channels: [8, 16]
-        kernel_size: [6, 12]
+        nlayers: [2, 3]
+        hidden_channels: [16]
+        kernel_size: [8]
         dilation_base: 2
-        epochs: 40
+        epochs: 100
         lr: 1.0e-3
         batch_size: 16
         factor: 0.5 # Learning rate scheduler
@@ -76,10 +76,10 @@ ENCODER_DECODER:
   CONSTELLATION: qpsk
   PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to +-this
   params:
-    nlayers: [2, 3]
-    dilation_base: [3]
+    nlayers: [3]
+    dilation_base: [2]
     kernel_size: [6]
-    hidden_channels: [8]
+    hidden_channels: [16]
     epochs: 200
     lr: 1.0e-3
     weight_decay: 1.0e-5    # AdamW L2 regularization; 0 disables. List -> swept.

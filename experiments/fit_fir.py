@@ -22,6 +22,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────────
+# DATASET_PATH = "data/sweeps/dc0.122A_fmin300000_fmax1.299e+07_20260623_1752.zarr"
 DATASET_PATH = "data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260626_1835.zarr"
 L            = 128    # FIR tap count used only to extract the channel's dominant zero
 VAL_FRACTION = 0.2
@@ -140,6 +141,13 @@ def main():
     rf_channel = int(np.ceil(channel_taps * MARGIN))
     rf_ed = int(np.ceil(eq_taps * MARGIN)) if eq_taps else None
 
+    # full-band broadband FIR, for comparison only: its tap count is inflated/biased by
+    # out-of-band extrapolation (the data does not constrain |f| outside the passband)
+    h_energy = np.cumsum(h ** 2) / np.sum(h ** 2)
+    fb_95 = int(np.searchsorted(h_energy, 0.95) + 1)
+    fb_99 = int(np.searchsorted(h_energy, 0.99) + 1)
+    H_full = np.fft.rfft(h, n=Nfft)
+
     print(f"dataset      : {Path(DATASET_PATH).name}")
     print(f"sample rate  : {fs / 1e6:.1f} MHz   (Ts = {Ts_ns:.2f} ns/tap)")
     print(f"band         : {f_min / 1e6:.2f} - {f_max / 1e6:.2f} MHz")
@@ -147,6 +155,8 @@ def main():
           f"   linear-fit RRMSE {rrmse:.1f}%")
     print("-" * 60)
     print(f"channel memory (in-band)      : {channel_taps:4d} taps  ({ib['gd_span_ns']:.0f} ns)")
+    print(f"full-band FIR (comparison)    : 95% energy {fb_95:2d} taps, 99% energy {fb_99:2d} taps  "
+          f"(out-of-band-biased — see plot)")
     print(f"recommended channel-model RF  : {rf_channel:4d} taps   (memory x{MARGIN:g})")
     if rf_ed:
         print(f"recommended encoder/decoder RF: {rf_ed:4d} taps   "
@@ -155,23 +165,31 @@ def main():
         print("recommended encoder/decoder RF: channel non-minimum-phase (rho>=1) — "
               "needs bulk delay + anti-causal taps")
 
-    # one figure: the real in-band channel and its impulse response
+    # one figure: in-band data vs the full-band broadband FIR, in frequency and time
     fig, (axA, axB) = plt.subplots(1, 2, figsize=(11, 4))
-    axA.plot(ib["f_hz"][ks] / 1e6, 20 * np.log10(np.abs(ib["Hk"][ks]) + 1e-12), "C0.-", ms=3)
+    axA.plot(ib["f_hz"][ks] / 1e6, 20 * np.log10(np.abs(ib["Hk"][ks]) + 1e-12),
+             "C0.-", ms=3, label="in-band H_k (data)")
+    axA.plot(ib["f_hz"] / 1e6, 20 * np.log10(np.abs(H_full) + 1e-12),
+             "C3-", alpha=0.7, label="full-band FIR fit")
+    axA.axvspan(f_min / 1e6, f_max / 1e6, color="C2", alpha=0.10, label="data passband")
     axA.set_xlabel("Frequency (MHz)")
-    axA.set_ylabel("|H_k| (dB)")
-    axA.set_title(f"In-band channel ({rolloff:.1f}x rolloff)")
+    axA.set_ylabel("|H| (dB)")
+    axA.set_title(f"Frequency: in-band data vs full-band FIR ({rolloff:.1f}x rolloff)")
     axA.grid(True, alpha=0.3)
+    axA.legend(fontsize=8)
 
     peak = int(np.argmax(np.abs(ib["h_bl"])))
     tb = (np.arange(len(ib["h_bl"])) - peak) * Ts_ns
-    axB.plot(tb, ib["h_bl"], "C1-")
+    axB.plot(tb, ib["h_bl"] / np.max(np.abs(ib["h_bl"])), "C1-", label="in-band IR (band-limited)")
+    hpk = int(np.argmax(np.abs(h)))
+    th = (np.arange(len(h)) - hpk) * Ts_ns
+    axB.plot(th, h / np.max(np.abs(h)), "C3.-", ms=3, label=f"full-band FIR taps (99%@{fb_99})")
     axB.set_xlim(-channel_taps * Ts_ns * 4, channel_taps * Ts_ns * 4)
     axB.axvspan(-ib["gd_span_ns"] / 2, ib["gd_span_ns"] / 2, color="C2", alpha=0.15,
-                label=f"memory ~{channel_taps} taps")
+                label=f"in-band memory ~{channel_taps} taps")
     axB.set_xlabel("Lag (ns)")
-    axB.set_ylabel("Amplitude")
-    axB.set_title("In-band impulse response")
+    axB.set_ylabel("Normalized amplitude")
+    axB.set_title("Impulse response (normalized)")
     axB.grid(True, alpha=0.3)
     axB.legend(fontsize=8)
     fig.tight_layout()
