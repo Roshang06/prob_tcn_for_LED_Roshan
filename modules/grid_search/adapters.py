@@ -13,7 +13,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-from modules.models import TCN_channel, GeneralizedMemoryPolynomial
+from modules.models import TCN_channel, GeneralizedMemoryPolynomial, LRU_channel
 
 
 _DIST_TO_FLAGS = {
@@ -182,6 +182,31 @@ class TCNAdapter:
         torch.save(self.model.state_dict(), path)
 
 
+class LRUAdapter(TCNAdapter):
+    '''Linear Recurrent Unit (deep linear-RNN / state-space) baseline.
+
+    Trains exactly like the TCN — same AdamW loop, Gaussian/Student-t NLL or MSE
+    objective, and probabilistic `distribution` switch — so it reuses everything
+    on TCNAdapter and only swaps in the LRU_channel construction. LRU_channel
+    shares TCN_channel's forward contract (mean, or (noisy, mean, std, nu)) and
+    exposes `receptive_field` (=1: an RNN has no fixed warm-up window).
+    '''
+    name = "lru"
+    ARCH_KEYS = ("state_dim", "hidden_dim", "n_layers", "dropout",
+                 "r_min", "r_max", "max_phase",
+                 "distribution", "learn_noise", "gaussian")
+    # TRAIN_KEYS inherited from TCNAdapter (epochs, lr, batch_size, factor, patience, min_lr)
+
+    @classmethod
+    def from_config(cls, params: dict, device: str, shared: dict = None) -> "LRUAdapter":
+        arch = {k: params[k] for k in cls.ARCH_KEYS if k in params}
+        if "distribution" in arch:
+            arch.update(_DIST_TO_FLAGS[arch.pop("distribution")])
+        model = LRU_channel(**arch).to(device)
+        train_params = {k: params[k] for k in cls.TRAIN_KEYS if k in params}
+        return cls(model, train_params, device, shared=shared)
+
+
 class GMPAdapter:
     name = "gmp"
     ARCH_KEYS = ("memory_linear", "memory_nonlinear", "nonlinearity_order", "cross_term_depth")
@@ -268,6 +293,7 @@ class MockAdapter:
 
 MODEL_REGISTRY = {
     TCNAdapter.name: TCNAdapter,
+    LRUAdapter.name: LRUAdapter,
     GMPAdapter.name: GMPAdapter,
     MockAdapter.name: MockAdapter,
 }

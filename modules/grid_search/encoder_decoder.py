@@ -231,7 +231,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
             sent_freq = self._frame_to_freq(eval_sent_time, ofdm_config)
             recv_freq = self._decode_freq(encoder.eval(), decoder.eval(), channel_model, eval_sent_time, ofdm_config)
             evm = evm_pct(sent_freq, recv_freq).item()
-        ch_model_type = f"TCN {ch_meta.get('distribution', 'none')}"
+        ch_model_type = f"{ch_meta.get('model', 'channel').upper()} {ch_meta.get('distribution', 'none')}"
         self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz,
                                  channel_id=point["channel_run_id"], channel_type=ch_model_type, evm=evm)
         return metrics

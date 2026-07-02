@@ -197,14 +197,15 @@ def _read_jsonl(path):
 
 def derive_channel_form(record) -> str:
     '''Human-readable channel model family for plot labels, from a channel-grid
-    runs.jsonl record: "gmp", "prob TCN" (learns noise) or "nonprob TCN".'''
+    runs.jsonl record: "gmp", "prob TCN"/"nonprob TCN", "prob LRU"/"nonprob LRU".'''
     rec = record or {}
     model = rec.get("model")
     if model == "gmp":
         return "gmp"
-    if model == "tcn":
+    if model in ("tcn", "lru"):
         dist = rec.get("distribution", "none")
-        return "prob TCN" if dist not in ("none", None) else "nonprob TCN"
+        prefix = "prob" if dist not in ("none", None) else "nonprob"
+        return f"{prefix} {model.upper()}"
     return model or "unknown"
 
 

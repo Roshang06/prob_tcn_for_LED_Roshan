@@ -32,7 +32,7 @@ from pyflux.core.block import Signal, ActionBlock, FunctionalBlock
 
 # Synthetic channel shared by the dataset generator and the Stage 5 loopback so the
 # encoder/decoders are validated on the same channel their channel models approximate.
-CHANNEL_FIR = torch.tensor([[[0.8, 0.3, -0.1]]], dtype=torch.float32)
+CHANNEL_FIR = torch.flip(torch.tensor([[[0.8, 0.3, -0.1]]], dtype=torch.float32), dims=[-1])
 NOISE_STD = 0.02
 
 
@@ -128,6 +128,22 @@ CHANNEL_GRID = {
                 "nonlinearity_order":  3,
                 "cross_term_depth":    [0, 1],
                 "ridge":               1e-3,
+            },
+        },
+        {
+            "model": "lru",
+            "params": {
+                "state_dim":        [4, 8],
+                "hidden_dim":       8,
+                "n_layers":         2,
+                "dropout":          0.0,
+                "distribution":     "none",
+                "epochs":           100,
+                "lr":               1e-3,
+                "batch_size":       16,
+                "factor":           0.5,
+                "patience":         5,
+                "min_lr":           1e-6,
             },
         },
     ]
@@ -245,7 +261,7 @@ if __name__ == "__main__":
                                ("validation", val_exp_dir)]:
         lb = Path(summary_dir) / "summary" / "leaderboard.csv"
         rows = list(csv.DictReader(open(lb)))
-        metric = "evm" if rows and "evm" in rows[0] else "rrmse_pct"  # channel ranks by rrmse, E/D by EVM
+        metric = "evm_pct" if rows and "evm_pct" in rows[0] else "rrmse_pct"  # channel ranks by rrmse, E/D by EVM
         print(f"\n  {label} leaderboard (sorted by {metric}):")
         for row in sorted(rows, key=lambda r: float(r[metric])):
             extra = f"  ber={float(row['ber']):.4f}" if row.get("ber") else ""
