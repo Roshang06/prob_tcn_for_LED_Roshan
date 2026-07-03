@@ -71,6 +71,8 @@ def make_synthetic_dataset(n_frames: int = 64) -> tuple[torch.Tensor, torch.Tens
     sent_time = torch.stack(sent_time_frames).float()
 
     fir = torch.tensor([[[0.8, 0.3, -0.1]]], dtype=torch.float32)
+    fir = torch.flip(fir, dims=[-1])
+
     recv_time = F.conv1d(sent_time.unsqueeze(1), fir, padding=2).squeeze(1)[:, :sent_time.shape[1]]
     recv_time = recv_time + 0.02 * torch.randn_like(recv_time)
 
@@ -118,7 +120,7 @@ ENCODER_DECODER_GRID = {
         "lr":              1e-3,
         "weight_decay":    1e-5,
         "batch_size":      8,
-        "nonCausalPadding": [0, 1, 4]
+        "nonCausalPadding": [0, 1]
     },
 }
 
