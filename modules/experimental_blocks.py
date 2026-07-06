@@ -37,8 +37,7 @@ def generate_zadoff_chu(length, root=1):
 
 def generate_zadoff_chu_freq(length, root=1):
     '''Complex constant-modulus (CAZAC) Zadoff-Chu sequence for mapping onto OFDM
-    subcarriers. |zc| = 1, giving a band-limited preamble with a sharp autocorrelation
-    and low PAPR.'''
+    subcarriers. |zc| = 1, giving a band-limited preamble with a sharp autocorrelation'''
     n = np.arange(length)
     if length % 2 == 0:
         return np.exp(-1j * np.pi * root * n * (n + 1) / length)
@@ -69,6 +68,7 @@ class ModulateDataOFDM(FunctionalBlock):
                  power_min: float = None,
                  power_max: float = None,
                  jitter_power: float = 0.0,
+                 clip_threshold: float = 3.0,
                  ):
         self.AWG_TABLE_LENGTH = 16_384
         self.output_length = int(self.AWG_TABLE_LENGTH * awg_table_fraction)
@@ -94,15 +94,16 @@ class ModulateDataOFDM(FunctionalBlock):
         self.upsample_factor = upsample_factor
         self.first_data_bin = len(self.leading_zero_subcarriers) + 1
 
-        assert self.output_length in [self.AWG_TABLE_LENGTH//8, self.AWG_TABLE_LENGTH//4, self.AWG_TABLE_LENGTH//2, self.AWG_TABLE_LENGTH], "Waveform length in samples must be one of [1000, 2000, 4000, 8000, 16000] for compatibility with Agilent 33250A arbitrary waveform generator"
+        assert self.output_length in [self.AWG_TABLE_LENGTH//16, self.AWG_TABLE_LENGTH//8, self.AWG_TABLE_LENGTH//4, self.AWG_TABLE_LENGTH//2, self.AWG_TABLE_LENGTH], "Waveform length in samples must be one of [1000, 2000, 4000, 8000, 16000] for compatibility with Agilent 33250A arbitrary waveform generator"
         assert upsample_factor in [1, 2, 4, 8, 16], "Upsample factor must be one of [1, 2, 4, 8, 16]"
         nyquist_frequency = subcarrier_spacing * (self.baseband_fft_length // 2)
-        assert f_max < nyquist_frequency, f"Maximum subcarrier frequency must be less than Nyquist frequency of {nyquist_frequency}"
-        assert self.output_length >= self.baseband_burst_length, f"Output waveform length must be at least as long as the baseband burst length of {self.baseband_burst_length} samples"
+        assert f_max <= nyquist_frequency, f"Maximum subcarrier frequency {f_max: .2e} must be less than Nyquist frequency of {nyquist_frequency: .2e}"
+        assert self.output_length >= self.baseband_burst_length, f"AWG waveform length must be at least as long as the baseband burst length of {self.baseband_burst_length} samples"
 
         self.power_min = power_min
         self.power_max = power_max
         self.jitter_power = jitter_power
+        self.clip_threshold = clip_threshold
         self.preamble = self._build_preamble()
 
     def _build_preamble(self):
@@ -142,13 +143,13 @@ class ModulateDataOFDM(FunctionalBlock):
         time_domain_signal_with_cp = np.concatenate((cyclic_prefix, time_domain_signal))
 
         preamble = self.preamble
-        time_domain_signal_with_cp = np.clip(time_domain_signal_with_cp, -3, 3)
+        time_domain_signal_with_cp = np.clip(time_domain_signal_with_cp, -self.clip_threshold, self.clip_threshold)
         baseband_burst = np.concatenate((preamble, time_domain_signal_with_cp))
 
 
         # Now, upsample from baseband sampling rate to AWG sampling rate with sinc interpolation
         awg_waveform = resample(baseband_burst, self.output_length)
-        awg_waveform = np.clip(awg_waveform, -3, 3)
+        awg_waveform = np.clip(awg_waveform, -self.clip_threshold, self.clip_threshold)
 
 
         payload = dict(
@@ -156,7 +157,7 @@ class ModulateDataOFDM(FunctionalBlock):
             source_bits=source_bits,
             sent_symbols=active_subcarriers,
             sent_baseband=time_domain_signal,    # symbol only (no CP/preamble); kept for validation plotting
-            sent_burst=baseband_burst,           # full burst [preamble | CP | symbol]; used for channel model training
+            sent_burst=baseband_burst,           # full burst [preamble | CP | symbol]
             awg_waveform=awg_waveform,
             awg_frequency=self.awg_frequency,
         )
@@ -289,6 +290,48 @@ class DemodulateDataOFDM(FunctionalBlock):
                             f"{len(y_t)} samples, need {needed} after each preamble. Widen the scope window.")
         return valid[chosen_peak_index], corr, peaks
 
+    def _plot_cp_removed_symbol(self, y_t, ofdm_symbol_start, preamble_length, tail=None,
+                                perfect_preamble=None):
+        cp = self.cyclic_prefix_length
+        win_start = ofdm_symbol_start + cp
+        win_end = win_start + (self.ofdm_symbol_length_with_cp - cp)
+        if tail is None:
+            tail = preamble_length # show a full preamble's worth past the window
+        plot_end = min(win_end + tail, len(y_t))
+        n = np.arange(win_end - 30, plot_end)
+
+        fig, (ax_sym, ax_cp) = plt.subplots(2, 1, figsize=(12, 6), sharey=True)
+
+        # top: end of the FFT window + trailing samples (watch for next preamble leaking in)
+        ax_sym.plot(n, y_t[win_end - 30:plot_end], lw=0.8)
+        ax_sym.axvspan(win_end - 30, win_end, color="tab:green", alpha=0.12,
+                       label="FFT window (CP removed)")
+        ax_sym.axvline(win_end, color="red", lw=1.2,
+                       label="window end / next-symbol boundary")
+        ax_sym.set_title("DemodulateDataOFDM: CP-removed OFDM symbol")
+        ax_sym.set_xlabel("Sample index")
+        ax_sym.set_ylabel("Amplitude")
+        ax_sym.legend(loc="upper right")
+        ax_sym.grid(True, alpha=0.3)
+
+        # bottom: original perfect preamble vs the preamble extracted from this capture,
+        # so sync/distortion is obvious. On a clean, well-synced capture the extracted
+        # preamble should track the perfect one sample-for-sample.
+        preamble_start = ofdm_symbol_start - preamble_length
+        recv_preamble = y_t[preamble_start : preamble_start + preamble_length]  # extracted preamble
+        k = np.arange(preamble_length)
+        ax_cp.plot(k, recv_preamble, lw=1.0, ls="--", label="extracted preamble (received)")
+        if perfect_preamble is not None:
+            ax_cp.plot(k, np.asarray(perfect_preamble), lw=1.2, label="original preamble (perfect)")
+        ax_cp.set_title("Original vs extracted preamble (should overlap)")
+        ax_cp.set_xlabel("Preamble sample index")
+        ax_cp.set_ylabel("Amplitude")
+        ax_cp.legend(loc="upper right")
+        ax_cp.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        plt.show()
+
     def transform(self, x:Signal) -> Signal:
         preamble = x.artifact_container['preamble']
         y_t = x.data
@@ -306,6 +349,10 @@ class DemodulateDataOFDM(FunctionalBlock):
         ofdm_symbol_end = ofdm_symbol_start + self.ofdm_symbol_length_with_cp
         ofdm_symbol = y_t[ofdm_symbol_start : ofdm_symbol_end]
         cyclic_prefix_removed = ofdm_symbol[self.cyclic_prefix_length :]
+
+        if self.debug:
+            self._plot_cp_removed_symbol(y_t, ofdm_symbol_start, len(preamble),
+                                         perfect_preamble=preamble)
 
         # Preamble-aligned full burst, same length as sent_burst
         x.artifact_container['received_burst'] = y_t[preamble_start : preamble_start + len(preamble) + self.ofdm_symbol_length_with_cp]
@@ -376,13 +423,18 @@ class ApplyEncoder(FunctionalBlock):
     def transform(self, x: Signal) -> Signal:
         burst = np.array(x.data, copy=True)
         preamble, symbol = burst[:self.preamble_length], burst[self.preamble_length:]
-        encoded_symbol = np.clip(self._apply(symbol), -self.clip_value, self.clip_value)
+
+        x.artifact_container['encoder_input'] = symbol
+
+        encoded_symbol = self._apply(symbol)
+        encoded_symbol = np.clip(encoded_symbol, -self.clip_value, self.clip_value)
+        x.artifact_container['encoder_output'] = encoded_symbol
         encoded = np.concatenate((preamble, encoded_symbol))
         x.data = encoded
         x.artifact_container['awg_waveform'] = np.clip(resample(encoded, self.output_length),
                                                        -self.clip_value, self.clip_value)
-        x.artifact_container['encoder_input'] = burst
-        x.artifact_container['encoder_output'] = encoded
+        
+        
         return x
 
 
@@ -411,13 +463,15 @@ class ApplyDecoder(FunctionalBlock):
         symbol_end = symbol_start + self.demod.ofdm_symbol_length_with_cp
         if self.debug:
             print(f"ApplyDecoder: received {len(received)} samples, symbol [{symbol_start}:{symbol_end}]")
+
+        decoder_input = received[symbol_start:symbol_end]
+        x.artifact_container['decoder_input'] = decoder_input
         decoded_symbol = self._apply(received[symbol_start:symbol_end])
+        x.artifact_container['decoder_output'] = decoded_symbol
         decoded = received.copy()
         decoded[symbol_start:symbol_end] = decoded_symbol
         x.data = decoded
-        x.artifact_container['decoder_input'] = received
-        x.artifact_container['decoder_output'] = decoded
-        x.artifact_container['decoder_window'] = (symbol_start, symbol_end)
+        x.artifact_container['decoder_window'] = (self.demod.cyclic_prefix_length,)
         return x
 
 

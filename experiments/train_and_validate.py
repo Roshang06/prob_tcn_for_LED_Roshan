@@ -34,9 +34,9 @@ EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
 
 SELECTED_CHANNEL_RUN_IDS = None  # None -> best per family; or ["tcn_xxxx", ...]
 SELECTED_ED_RUN_IDS = None       # None -> all E/D runs; or ["tcn_ae_xxxx", ...]
-VALIDATION_TRIALS = 10
+VALIDATION_TRIALS = 20
 
-MEASURED_A_OFFSET = 0.002        # stable current sits ~2 mA below the set point
+MEASURED_A_OFFSET = 0.000
 
 
 if __name__ == "__main__":
@@ -66,6 +66,7 @@ if __name__ == "__main__":
 
         # single DC offset per dataset (see AppendToDataset)
         dc_offset_A = float(cfg.DC_OFFSETS[0])
+        assert dc_offset_A < 0.4, f"DC offset {dc_offset_A} A exceeds safe range for the LED driver"
         min_freq    = float(cfg.F_MINS[0])
         max_freq    = float(cfg.F_MAXS[0])
         osc_fs      = float(cfg.OSC_SAMPLE_RATES[0])
@@ -78,7 +79,7 @@ if __name__ == "__main__":
         check_channel = CheckChannel(awg_driver=awg, osc_driver=osc, data_channel=3)
 
         mod_ofdm = ModulateDataOFDM(
-            constellation=get_constellation("qpsk"),
+            constellation=get_constellation(cfg.MODULATION_FORMAT),
             f_min=min_freq, f_max=max_freq,
             subcarrier_spacing=subcarrier_spacing,
             preamble_method="zadoff_chu",
@@ -89,20 +90,21 @@ if __name__ == "__main__":
             power_min=getattr(cfg, 'POWER_MIN', None),
             power_max=getattr(cfg, 'POWER_MAX', None),
             jitter_power=getattr(cfg, 'JITTER_POWER', 0.0),
+            clip_threshold=float(cfg.CLIP_THRESHOLD),
         )
 
         f_AWG = mod_ofdm.awg_frequency
         Exp.log(f"AWG frequency {f_AWG:.2f} Hz")
         osc.set_horizontal_scale(0.2 / f_AWG)
         send_waveform = SendWaveform(
-            fs=mod_ofdm.fs_out, awg_driver=awg, freq=f_AWG, amplitude=18.0, offset=0)
+            fs=mod_ofdm.fs_out, awg_driver=awg, freq=f_AWG, amplitude=18, offset=0)
         measure_waveform = MeasureWaveform(
             fs_in=mod_ofdm.fs_out, fs_out=osc_fs, osc_driver=osc,
             input_signal_frequency=f_AWG, trigger_channel=1, data_channel=3, debug=False)
         resample_waveform = ResampleMeasuredWaveform(
             fs_in=osc_fs, fs_out=mod_ofdm.baseband_sampling_rate, debug=False)
         demod_ofdm = DemodulateDataOFDM(
-            constellation=get_constellation("qpsk"),
+            constellation=get_constellation(cfg.MODULATION_FORMAT),
             f_min=min_freq, f_max=max_freq, subcarrier_spacing=subcarrier_spacing,
             preamble_method="zadoff_chu",
             baseband_fft_length=mod_ofdm.baseband_fft_length,
@@ -137,9 +139,6 @@ if __name__ == "__main__":
             Exp.log(f"dataset saved to {dataset_path}")
         else:
             Exp.log(f"reusing existing dataset at {dataset_path}")
-
-        mod_ofdm.jitter_power = 0.0  # collection done; validation transmits clean symbols
-        mod_ofdm.power_min = mod_ofdm.power_max = None  # no random power scaling/clip in validation; natural symbol power matches E/D training
 
         check_channel.run("post-collection")
 
@@ -182,12 +181,36 @@ if __name__ == "__main__":
         check_channel.run("pre-validation")
         _restore_ofdm_scope()
 
+        # Validation transmits clean symbols with its own constellation (independent of the
+        # data-collection constellation), so build a dedicated mod/demod: no power sweep or
+        # jitter, natural symbol power matching E/D training.
+        val_constellation = get_constellation(Exp.config.ENCODER_DECODER_VALIDATION.CONSTELLATION)
+        mod_ofdm_val = ModulateDataOFDM(
+            constellation=val_constellation,
+            f_min=min_freq, f_max=max_freq,
+            subcarrier_spacing=subcarrier_spacing,
+            preamble_method="zadoff_chu",
+            awg_table_fraction=cfg.AWG_TABLE_FRACTION,
+            cyclic_prefix_fraction=cfg.CP_LENGTH_FRACTION,
+            upsample_factor=cfg.UPSAMPLE_FACTOR,
+            preamble_length=cfg.PREAMBLE_LENGTH,
+            power_min=None, power_max=None, jitter_power=0.0,
+            clip_threshold=float(cfg.CLIP_THRESHOLD),
+        )
+        demod_ofdm_val = DemodulateDataOFDM(
+            constellation=val_constellation,
+            f_min=min_freq, f_max=max_freq, subcarrier_spacing=subcarrier_spacing,
+            preamble_method="zadoff_chu",
+            baseband_fft_length=mod_ofdm_val.baseband_fft_length,
+            cyclic_prefix_length=mod_ofdm_val.cyclic_prefix_length,
+            upsample_factor=cfg.UPSAMPLE_FACTOR, debug=False)
+
         validation = EncoderDecoderValidation(
             ed_models,
-            (mod_ofdm, send_waveform, measure_waveform, resample_waveform, demod_ofdm),
+            (mod_ofdm_val, send_waveform, measure_waveform, resample_waveform, demod_ofdm_val),
             num_trials=VALIDATION_TRIALS,
-            constellation=get_constellation("qpsk"),
-            clip_value=float(Exp.config.ENCODER_DECODER.PREAMBLE_AMPLITUDE),
+            constellation=val_constellation,
+            clip_value=float(cfg.CLIP_THRESHOLD),
             device=device, seed=seed, experiments_dir=EXP_DIR, experiment_name="ed_validation",
             run_prefix=RUN_NAME, debug=False)
         val_exp_dir = validation.run()
@@ -205,5 +228,6 @@ if __name__ == "__main__":
             print(f"\n  {label} leaderboard (sorted by {metric}):")
             for row in sorted(rows, key=lambda r: float(r[metric])):
                 extra = f"  ber={float(row['ber']):.4f}" if row.get("ber") else ""
+                dist = row.get("distribution") or row.get("channel_distribution") or row.get("channel_form") or "?"
                 print(f"    {row['run_id']}  {metric}={float(row[metric]):.6f}{extra}  "
-                      f"params={row['num_params']}  t={row['train_seconds']}s")
+                      f"dist={dist}  params={row['num_params']}  t={row['train_seconds']}s")

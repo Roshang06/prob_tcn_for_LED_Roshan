@@ -37,6 +37,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
                  seed=0,
                  experiment_name="encoder_decoder",
                  preamble_length=256,
+                 clip_threshold=3.0,
                  run_prefix=None,
                  ):
 
@@ -44,6 +45,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self.channel_models = {cm["run_id"]: cm for cm in channel_models}
         self.constellation = get_constellation(grid_config["constellation"])
         self.preamble_amplitude = float(grid_config["preamble_amplitude"])
+        self.clip_threshold = float(clip_threshold)
         self.preamble_length = preamble_length
 
         ed_points = expand_grid([{"model": "tcn_ae", "params": grid_config["params"]}])
@@ -75,7 +77,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         dataset_path overrides DATA_COLLECTION.DATASET_PATH from the config file;
         use this when the dataset was just created and the YAML still shows null.
         '''
-        with open(Path(config_path)) as f:
+        with open(Path(config_path), encoding="utf-8") as f:
             full = yaml.safe_load(f)
         grid_config = {k.lower(): v for k, v in full["ENCODER_DECODER"].items()}
         if dataset_path is None:
@@ -85,6 +87,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
                    device=device, seed=seed, experiment_name=experiment_name,
                    experiments_dir=experiments_dir,
                    preamble_length=int(full["DATA_COLLECTION"]["PREAMBLE_LENGTH"]),
+                   clip_threshold=float(full["DATA_COLLECTION"]["CLIP_THRESHOLD"]),
                    run_prefix=run_prefix)
 
     def _prepare(self, ofdm_config=None):
@@ -109,7 +112,8 @@ class EncoderDecoderGridSearch(GridSearchBase):
         true_bits = np.random.randint(0, 2, size=(batch_size, num_bits))
         symbols = [self.constellation.bits_to_symbols("".join(map(str, bits))) for bits in true_bits]
         true_frame = torch.tensor(np.stack(symbols), dtype=torch.complex64, device=self.device)
-        sent_time = symbols_to_time(true_frame, ofdm_config.num_leading_zeros, ofdm_config.num_trailing_zeros)
+        sent_time = symbols_to_time(true_frame, ofdm_config.num_leading_zeros, ofdm_config.num_trailing_zeros,
+                                    negative_rail=-self.clip_threshold, positive_rail=self.clip_threshold)
         sent_time = torch.hstack((sent_time[:, -ofdm_config.cyclic_prefix_length:], sent_time))
         sent_time = torch.hstack((self.preamble.expand(batch_size, -1), sent_time))  # [preamble | CP | symbol]
         return torch.tensor(true_bits, device=self.device), sent_time
@@ -119,7 +123,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         # the preamble is never processed
         pre = self.preamble_length
         preamble, symbol = sent_time[:, :pre], sent_time[:, pre:]
-        encoded_symbol = encoder(symbol).clamp(-self.preamble_amplitude, self.preamble_amplitude)
+        encoded_symbol = encoder(symbol).clamp(-self.clip_threshold, self.clip_threshold)
         channel_out = channel_model(encoded_symbol)
         received_symbol = channel_out[0] if isinstance(channel_out, tuple) else channel_out
         decoded_symbol = decoder(received_symbol)

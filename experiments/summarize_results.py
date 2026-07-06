@@ -33,11 +33,11 @@ from modules.utils import calculate_rrmse_pct_loss
 # ─── USER CONFIG ────────────────────────────────────────────────────────────────
 RUN_CONFIGS = [
     {
-        "label": "121mA",
-        "dc_ma": 121,
-        "channel_exp_dir": "data/experiments/train_and_validate/north_trail_channel_models_20260630_1315",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/north_trail_ed_validation_20260630_1340",
-        "dataset_path":    "data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260628_1234.zarr",
+        "label": "NAmA",
+        "dc_ma": -99,
+        "channel_exp_dir": "data/experiments/train_and_validate/mint_surf_channel_models_20260704_2358",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/sleek_slope_ed_validation_20260705_1303",
+        "dataset_path":    "data/sweeps/dc0.05A_fmin300000_fmax7.6e+06_20260703_1631.zarr",
     },
     # add more DC offsets here, e.g.:
     # {
@@ -420,7 +420,7 @@ def plot_qq(run_configs: list[dict]) -> None:
         figsize=(_fw2 if ncols > 1 else _fw, nrows * _fh),
         constrained_layout=True,
     )
-    fig.suptitle("Q-Q Plots of Standardized Residuals – Prob TCN Channel Models",
+    fig.suptitle("Q-Q Plots of Standardized Residuals for Prob TCN Channel Models",
                  fontsize=_FONT)
     axes = np.array(axs_grid).flatten()
 
@@ -434,7 +434,7 @@ def plot_qq(run_configs: list[dict]) -> None:
             ax.set_visible(False)
             continue
 
-        best = _best_by(prob_runs, "val_rrmse_pct")
+        best = _best_by(prob_runs, "val_nll")
         adapter = load_adapter(best, cfg["channel_exp_dir"])
         model = adapter.model
         model.eval()
@@ -467,7 +467,7 @@ def plot_qq(run_configs: list[dict]) -> None:
             r_norm    = stats.norm.ppf(cdf_vals)
             (osm, osr), _ = stats.probplot(r_norm, dist="norm")
             ax.plot(osm, osr, ".", color=cmap(0.5), markersize=1,
-                    label="t→Normal Transform", rasterized=True)
+                    label="t to Normal Transform", rasterized=True)
 
         ax.plot([-4.5, 4.5], [-4.5, 4.5], "--", color=cmap(0.1), label="y=x Standard Normal")
         ax.set_xlim(-4.5, 4.5)
@@ -598,6 +598,235 @@ def plot_packet_response(run_configs: list[dict]) -> None:
     plt.show()
 
 
+# ─── PLOT 5/6: EVM% (and SNR dB) vs frequency from the fixed preamble ──────────
+
+def evm_percent_to_snr_db(evm_percent):
+    evm_fraction = np.asarray(evm_percent) / 100.0
+    return -20.0 * np.log10(evm_fraction + 1e-12)
+
+
+def load_fixed_preamble_and_received_preambles(dataset_path, device=DEVICE):
+    root = zarr.open_group(_resolve(dataset_path), mode="r")
+    attrs = dict(root.attrs)
+    active_carrier_indices = np.array(attrs["active_carrier_indices"])
+    preamble_length = int(attrs["preamble_length"])
+    cyclic_prefix_length = int(attrs["cyclic_prefix_length"])
+    subcarrier_spacing_hz = float(attrs["f_min_hz"]) / active_carrier_indices[0]
+    symbol_length = root["sent_burst"].shape[1] - preamble_length - cyclic_prefix_length
+    baseband_sampling_rate_hz = symbol_length * subcarrier_spacing_hz
+    band_min_hz = float(attrs["f_min_hz"])
+    band_max_hz = float(attrs.get("f_max_hz", active_carrier_indices[-1] * subcarrier_spacing_hz))
+    sent_preamble = torch.tensor(root["sent_burst"][0, :preamble_length], dtype=torch.float32, device=device)
+    received_preambles = np.array(root["received_burst"][:, :preamble_length])
+    return (sent_preamble, received_preambles, preamble_length,
+            baseband_sampling_rate_hz, band_min_hz, band_max_hz)
+
+
+def preamble_in_band_frequencies(preamble_length, baseband_sampling_rate_hz, band_min_hz, band_max_hz):
+    preamble_frequencies_hz = np.fft.rfftfreq(preamble_length, d=1.0 / baseband_sampling_rate_hz)
+    in_band_mask = (preamble_frequencies_hz >= band_min_hz) & (preamble_frequencies_hz <= band_max_hz)
+    return preamble_frequencies_hz[in_band_mask], in_band_mask
+
+
+def measured_preamble_evm_vs_frequency(received_preambles, in_band_mask):
+    received_spectrum = np.fft.rfft(received_preambles, norm="ortho", axis=-1)[:, in_band_mask]
+    mean_signal_spectrum = received_spectrum.mean(axis=0)
+    residual_noise_power = np.mean(np.abs(received_spectrum - mean_signal_spectrum[None, :]) ** 2, axis=0)
+    return np.sqrt(residual_noise_power) / (np.abs(mean_signal_spectrum) + 1e-12) * 100.0
+
+
+def predicted_preamble_evm_vs_frequency(adapter, sent_preamble, in_band_mask, is_gaussian,
+                                        num_stochastic_samples=5000):
+    model = adapter.model
+    model.eval()
+    device = next(model.parameters()).device
+    preamble_batch = sent_preamble.unsqueeze(0).to(device)
+    with torch.no_grad():
+        _, predicted_mean, predicted_std, predicted_nu = model(preamble_batch)
+        if is_gaussian:
+            predicted_distribution = torch.distributions.Normal(predicted_mean, predicted_std)
+        else:
+            predicted_distribution = torch.distributions.StudentT(predicted_nu, predicted_mean, predicted_std)
+        stochastic_samples = predicted_distribution.sample((num_stochastic_samples,)).squeeze(1).cpu().numpy()
+    mean_response = predicted_mean.squeeze(0).cpu().numpy()
+    mean_signal_spectrum = np.fft.rfft(mean_response, norm="ortho")[in_band_mask]
+    sample_spectra = np.fft.rfft(stochastic_samples, norm="ortho", axis=-1)[:, in_band_mask]
+    residual_noise_power = np.mean(np.abs(sample_spectra - mean_signal_spectrum[None, :]) ** 2, axis=0)
+    return np.sqrt(residual_noise_power) / (np.abs(mean_signal_spectrum) + 1e-12) * 100.0
+
+
+def best_probabilistic_channel_runs(channel_exp_dir):
+    channel_runs = load_channel_runs(channel_exp_dir)
+    probabilistic_runs = [run for run in channel_runs
+                          if (run.get("distribution") or "none") in ("gaussian", "students_t")]
+    selected_runs = []
+    for model_name in dict.fromkeys(run["model"] for run in probabilistic_runs):
+        architecture_runs = [run for run in probabilistic_runs if run["model"] == model_name]
+        best_run = _best_by(architecture_runs, "val_nll", "val_rrmse_pct")
+        selected_runs.append((model_name, best_run.get("distribution") or "none", best_run))
+    selected_runs.sort(key=lambda selected: _model_type_sort_key((selected[0], selected[1])))
+    return selected_runs
+
+
+def plot_preamble_evm_vs_frequency(run_configs, as_snr_db=False):
+    number_of_configs = len(run_configs)
+    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh), sharex=True, sharey=True,
+                             constrained_layout=True)
+    axes_flat = axes.flatten()
+
+    for panel_index, cfg in enumerate(run_configs):
+        ax = axes_flat[panel_index]
+        (sent_preamble, received_preambles, preamble_length, baseband_sampling_rate_hz,
+         band_min_hz, band_max_hz) = load_fixed_preamble_and_received_preambles(cfg["dataset_path"])
+        in_band_frequencies_hz, in_band_mask = preamble_in_band_frequencies(
+            preamble_length, baseband_sampling_rate_hz, band_min_hz, band_max_hz)
+        frequencies_mhz = in_band_frequencies_hz / 1e6
+
+        measured_evm = measured_preamble_evm_vs_frequency(received_preambles, in_band_mask)
+        measured_curve = evm_percent_to_snr_db(measured_evm) if as_snr_db else measured_evm
+        ax.plot(frequencies_mhz, measured_curve, color="black", marker=".", markersize=2.5,
+                linestyle="-", label="Measured Preamble")
+
+        for model_name, distribution_name, channel_run in best_probabilistic_channel_runs(cfg["channel_exp_dir"]):
+            adapter = load_adapter(channel_run, cfg["channel_exp_dir"])
+            predicted_evm = predicted_preamble_evm_vs_frequency(
+                adapter, sent_preamble, in_band_mask, distribution_name == "gaussian")
+            predicted_curve = evm_percent_to_snr_db(predicted_evm) if as_snr_db else predicted_evm
+            style = _get_style(model_name, distribution_name)
+            ax.plot(frequencies_mhz, predicted_curve, color=style["color"], marker=style["marker"],
+                    linestyle=style["linestyle"], markersize=2.5,
+                    label=f"Predicted {_model_type_label(model_name, distribution_name)}")
+
+        ax.set_title(cfg["label"], fontsize=_FONT)
+        ax.grid(True)
+        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
+                fontsize=_FONT, va="top", ha="left")
+        ax.tick_params(labelbottom=True)
+        if panel_index % 2 == 0:
+            ax.set_ylabel("SNR (dB)" if as_snr_db else "EVM (%)")
+        ax.set_xlabel("Frequency (MHz)")
+
+    axes_flat[0].legend(fontsize=_SMALL, handlelength=3, labelspacing=0.5)
+    for ax in axes_flat[number_of_configs:]:
+        ax.set_visible(False)
+
+    file_stem = "preamble_snr_vs_frequency" if as_snr_db else "preamble_evm_vs_frequency"
+    plt.savefig(PLOT_PATH / f"{file_stem}.svg", format="svg", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / f"{file_stem}.png", bbox_inches="tight")
+    plt.show()
+
+
+def plot_preamble_residual_evm_vs_frequency(run_configs):
+    number_of_configs = len(run_configs)
+    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh), sharex=True, sharey=True,
+                             constrained_layout=True)
+    axes_flat = axes.flatten()
+
+    for panel_index, cfg in enumerate(run_configs):
+        ax = axes_flat[panel_index]
+        (sent_preamble, received_preambles, preamble_length, baseband_sampling_rate_hz,
+         band_min_hz, band_max_hz) = load_fixed_preamble_and_received_preambles(cfg["dataset_path"])
+        in_band_frequencies_hz, in_band_mask = preamble_in_band_frequencies(
+            preamble_length, baseband_sampling_rate_hz, band_min_hz, band_max_hz)
+        frequencies_mhz = in_band_frequencies_hz / 1e6
+        measured_evm = measured_preamble_evm_vs_frequency(received_preambles, in_band_mask)
+
+        ax.axhline(0.0, color="black", linewidth=0.8)
+        for model_name, distribution_name, channel_run in best_probabilistic_channel_runs(cfg["channel_exp_dir"]):
+            adapter = load_adapter(channel_run, cfg["channel_exp_dir"])
+            predicted_evm = predicted_preamble_evm_vs_frequency(
+                adapter, sent_preamble, in_band_mask, distribution_name == "gaussian")
+            residual_evm = measured_evm - predicted_evm
+            style = _get_style(model_name, distribution_name)
+            ax.plot(frequencies_mhz, residual_evm, color=style["color"], marker=style["marker"],
+                    linestyle=style["linestyle"], markersize=2.5,
+                    label=f"{_model_type_label(model_name, distribution_name)} (mean {np.mean(residual_evm):.1f}%)")
+
+        ax.set_title(cfg["label"], fontsize=_FONT)
+        ax.grid(True)
+        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
+                fontsize=_FONT, va="top", ha="left")
+        ax.tick_params(labelbottom=True)
+        if panel_index % 2 == 0:
+            ax.set_ylabel("Residual EVM (%)")
+        ax.set_xlabel("Frequency (MHz)")
+
+    axes_flat[0].legend(fontsize=_SMALL, handlelength=3, labelspacing=0.5)
+    for ax in axes_flat[number_of_configs:]:
+        ax.set_visible(False)
+
+    plt.savefig(PLOT_PATH / "preamble_residual_evm_vs_frequency.svg", format="svg", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / "preamble_residual_evm_vs_frequency.png", bbox_inches="tight")
+    plt.show()
+
+
+# ─── PLOT 7: EVM% vs frequency from empirical E/D validation waveforms ─────────
+
+def subcarrier_frequencies_mhz(dataset_path, active_carrier_indices):
+    attrs = dict(zarr.open_group(_resolve(dataset_path), mode="r").attrs)
+    subcarrier_spacing_hz = float(attrs["f_min_hz"]) / active_carrier_indices[0]
+    return active_carrier_indices * subcarrier_spacing_hz / 1e6
+
+
+def validation_run_evm_vs_frequency(ed_val_exp_dir, validation_run_id, active_carrier_indices):
+    validation_group = zarr.open_group(_resolve(ed_val_exp_dir) / "validation.zarr", mode="r")[validation_run_id]
+    sent_spectrum = np.fft.rfft(validation_group["sent_time"][:], norm="ortho", axis=-1)[:, active_carrier_indices]
+    received_spectrum = np.fft.rfft(validation_group["received_time"][:], norm="ortho", axis=-1)[:, active_carrier_indices]
+    residual_power = np.mean(np.abs(sent_spectrum - received_spectrum) ** 2, axis=0)
+    signal_power = np.mean(np.abs(sent_spectrum) ** 2, axis=0)
+    return np.sqrt(residual_power / (signal_power + 1e-12)) * 100.0
+
+
+def best_validation_run_for_channel(ed_val_exp_dir, channel_run_id, active_carrier_indices):
+    validation_runs = _read_jsonl(_resolve(ed_val_exp_dir) / "runs.jsonl")
+    matching_validation_runs = [run for run in validation_runs if run.get("channel_run_id") == channel_run_id]
+    if not matching_validation_runs:
+        return None
+    return min(matching_validation_runs,
+               key=lambda run: float(np.nanmean(validation_run_evm_vs_frequency(
+                   ed_val_exp_dir, run["run_id"], active_carrier_indices))))["run_id"]
+
+
+def plot_validation_evm_vs_frequency(run_configs):
+    number_of_configs = len(run_configs)
+    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh), sharex=True, sharey=True,
+                             constrained_layout=True)
+    axes_flat = axes.flatten()
+
+    for panel_index, cfg in enumerate(run_configs):
+        ax = axes_flat[panel_index]
+        _, _, active_carrier_indices, _ = load_dataset(cfg["dataset_path"])
+        frequencies_mhz = subcarrier_frequencies_mhz(cfg["dataset_path"], active_carrier_indices)
+
+        for model_name, distribution_name, channel_run in best_probabilistic_channel_runs(cfg["channel_exp_dir"]):
+            validation_run_id = best_validation_run_for_channel(
+                cfg["ed_val_exp_dir"], channel_run["run_id"], active_carrier_indices)
+            if validation_run_id is None:
+                continue
+            evm_curve = validation_run_evm_vs_frequency(cfg["ed_val_exp_dir"], validation_run_id, active_carrier_indices)
+            style = _get_style(model_name, distribution_name)
+            ax.plot(frequencies_mhz, evm_curve, color=style["color"], marker=style["marker"],
+                    linestyle=style["linestyle"], markersize=2.5,
+                    label=f"{_model_type_label(model_name, distribution_name)} E/D")
+
+        ax.set_title(cfg["label"], fontsize=_FONT)
+        ax.grid(True)
+        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
+                fontsize=_FONT, va="top", ha="left")
+        ax.tick_params(labelbottom=True)
+        if panel_index % 2 == 0:
+            ax.set_ylabel("Validation EVM (%)")
+        ax.set_xlabel("Frequency (MHz)")
+
+    axes_flat[0].legend(fontsize=_SMALL, handlelength=3, labelspacing=0.5)
+    for ax in axes_flat[number_of_configs:]:
+        ax.set_visible(False)
+
+    plt.savefig(PLOT_PATH / "validation_evm_vs_frequency.svg", format="svg", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / "validation_evm_vs_frequency.png", bbox_inches="tight")
+    plt.show()
+
+
 # ─── GMP ERR: term ranking for the best GMP model at each DC bias ───────────────
 
 def print_best_gmp_err(run_configs: list[dict]) -> None:
@@ -636,6 +865,18 @@ if __name__ == "__main__":
 
     print("Plot 4 – Gaussian wave packet TCN response ...")
     plot_packet_response(run_configs)
+
+    print("Plot 5 – Preamble EVM% vs frequency ...")
+    plot_preamble_evm_vs_frequency(run_configs)
+
+    print("Plot 6 – Preamble SNR (dB) vs frequency ...")
+    plot_preamble_evm_vs_frequency(run_configs, as_snr_db=True)
+
+    print("Plot 6b – Preamble residual EVM% (measured - predicted) vs frequency ...")
+    plot_preamble_residual_evm_vs_frequency(run_configs)
+
+    print("Plot 7 – E/D validation EVM% vs frequency ...")
+    plot_validation_evm_vs_frequency(run_configs)
 
     print("\nBest GMP ERR term ranking per DC bias ...")
     print_best_gmp_err(run_configs)

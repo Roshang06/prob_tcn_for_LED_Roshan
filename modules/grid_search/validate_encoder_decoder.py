@@ -167,8 +167,8 @@ class EncoderDecoderValidation(GridSearchBase):
         fig.savefig(run_dir / "plots" / "constellation.png", dpi=120)
 
     def _plot_waveform(self, run_dir, example, label):
-        # mark=True rows are the full received capture; the decoder only touches the
-        # synced symbol window, so draw red lines at its bounds on those panels.
+        # mark=True rows are the sliced [CP|symbol] decoder window (indexed from 0); draw a
+        # red line at the CP->symbol boundary (where the FFT window starts) in slice coords.
         rows = [
             ("encoder input", example["encoder_input"], False),
             ("encoder output", example["encoder_output"], False),

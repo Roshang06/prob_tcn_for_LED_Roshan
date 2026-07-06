@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────────
-DATASET_PATH = "data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260625_1419.zarr"
+DATASET_PATH = "data/sweeps/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr"
 PLOT_PATH    = HERE.parent / "data/plots"
 # ────────────────────────────────────────────────────────────────────────────────
 
