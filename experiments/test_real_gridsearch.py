@@ -9,7 +9,7 @@ import csv
 import os
 import sys
 from pathlib import Path
-
+import zarr
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -32,13 +32,13 @@ from pyflux.core.block import Signal
 
 # ── Experiment output ────────────────────────────────────────────────────────
 EXP_DIR   = Path("data/experiments/test_gridsearch")
-DEVICE    = "cpu"
+DEVICE    = "cuda"
 SEED      = 42
 
 # ── Synthetic OFDM geometry ──────────────────────────────────────────────────
-K_MIN            = 30
-K_MAX            = 100
-SUBCARRIER_SPACING_HZ = 10e3
+K_MIN            = 3
+K_MAX            = 76
+SUBCARRIER_SPACING_HZ = 10e4
 
 
 ofdm_modulator = ModulateDataOFDM(
@@ -49,7 +49,7 @@ ofdm_modulator = ModulateDataOFDM(
     preamble_method="zadoff_chu",
     awg_table_fraction=0.5,
     cyclic_prefix_fraction=0.125,
-    upsample_factor=2,
+    upsample_factor=4,
     preamble_length=256
 )
 
@@ -77,6 +77,22 @@ def make_synthetic_dataset(n_frames: int = 64) -> tuple[torch.Tensor, torch.Tens
     recv_time = recv_time + 0.02 * torch.randn_like(recv_time)
 
     return sent_time, recv_time
+
+def read_dataset(n_frames: int = 64) -> tuple[torch.Tensor, torch.Tensor]:
+    sent_arr = zarr.open("data\dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr\sent_burst", mode='r')
+    recieved_arr = zarr.open("data\dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr\\received_burst", mode='r')
+    """
+    Shape: (5000, 940)
+    Data Type: float32
+    Chunks: (64, 940)
+    Subset shape: (100, 940)
+    """
+    sent_time = torch.from_numpy(sent_arr[:n_frames, :]).float()
+    recv_time = torch.from_numpy(recieved_arr[:n_frames, :]).float()
+
+    return sent_time, recv_time
+
+    
 
 CHANNEL_GRID = {
     "VAL_FRACTION": 0.2,
@@ -120,7 +136,7 @@ ENCODER_DECODER_GRID = {
         "lr":              1e-3,
         "weight_decay":    1e-5,
         "batch_size":      8,
-        "nonCausalPadding": [0, 1]
+        "nonCausalPadding": [0]
     },
 }
 
@@ -130,12 +146,12 @@ if __name__ == "__main__":
     print("Stage 1: channel model grid search")
     print("=" * 60)
 
-    X, Y = make_synthetic_dataset(n_frames=1000)
+    X, Y = read_dataset(n_frames=5000)
     print(f"Synthetic dataset: X{tuple(X.shape)}  Y{tuple(Y.shape)}")
 
     channel_gs = ChannelModelGridSearch(
         CHANNEL_GRID,
-        dataset_path="synthetic",
+        dataset_path="synthetic", 
         experiments_dir=EXP_DIR,
         device=DEVICE,
         seed=SEED,
