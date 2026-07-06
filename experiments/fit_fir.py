@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE.parent))
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────────
 # DATASET_PATH = "data/sweeps/dc0.122A_fmin300000_fmax1.299e+07_20260623_1752.zarr"
-DATASET_PATH = "data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260626_1835.zarr"
+DATASET_PATH = "data/sweeps/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr"
 L            = 128    # FIR tap count used only to extract the channel's dominant zero
 VAL_FRACTION = 0.2
 RIDGE        = 1e-3

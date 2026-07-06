@@ -255,21 +255,11 @@ def in_band_filter(x, ks_indices, nfft):
     return filtered_x
 
 def in_band_time_loss(sent_time, decoded_time, ks_indices, n_fft):
-    """In-band loss computed directly in the frequency domain.
-
-    Compares sent and decoded signals only on the active subcarrier bins,
-    with no time-domain filter or padding — zero phase by construction.
-
-    Works for any input length N (symbol-only or full burst [preamble|CP|symbol]):
-    carrier indices defined for the n_fft-point FFT are scaled to the actual
-    N-point FFT by frequency, so the same physical frequencies are selected
-    regardless of how much of the burst is included.
+    """In-band (per-carrier) loss, computed on the OFDM symbol only.
     """
-    N = sent_time.shape[-1]
-    sent_fft = torch.fft.rfft(sent_time, norm="ortho")
-    decoded_fft = torch.fft.rfft(decoded_time, norm="ortho")
-    # Scale carrier bin indices from n_fft-point FFT to N-point FFT
-    active = (ks_indices.float() * (N / n_fft)).round().long().clamp(0, N // 2)
+    sent_fft = torch.fft.fft(sent_time[..., -n_fft:], norm="ortho", dim=-1)
+    decoded_fft = torch.fft.fft(decoded_time[..., -n_fft:], norm="ortho", dim=-1)
+    active = ks_indices.long()
     err = sent_fft[:, active] - decoded_fft[:, active]
     return torch.mean(err.real ** 2 + err.imag ** 2)
 
