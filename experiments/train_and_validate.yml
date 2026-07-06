@@ -1,0 +1,89 @@
+RUNTIME:
+  DEVICE: cpu
+  SEED: 0
+
+# Set either path to reuse a previously trained experiment and skip that grid
+# search step entirely. Leave unset (or null) to run a fresh grid search.
+# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/channel_models_YYYYMMDD_HHMM
+# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/encoder_decoder_YYYYMMDD_HHMM
+
+
+# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/azure_vault_channel_models_20260629_0713
+# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/azure_vault_encoder_decoder_20260629_0738
+HARDWARE_RESOURCES:
+    Agilent_33250A:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: Agilent Technologies,33250A,0,1.03-1.01-1.00-03-1
+    Tektronix_TDS2000:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: TEKTRONIX,TBS2074,C020561,CF:91.1CT FV:v1.26.0; FPGA:v1.21;
+    HP_EE3631A:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: HEWLETT-PACKARD,E3631A,0,1.6-5.0-1.0
+DATA_COLLECTION:
+  N: 3000 # Number of datapoints collected at the DC offset
+  DC_OFFSETS: [0.122] # A (single offset per dataset)
+  F_MINS: [300e3] # Hz
+  F_MAXS: [13e6] # Hz
+  OSC_SAMPLE_RATES: [500e6] # Hz
+  SUBCARRIER_SPACING: 100e3 # Hz
+  UPSAMPLE_FACTOR: 4
+  AWG_TABLE_FRACTION: 0.5
+  CP_LENGTH_FRACTION: 0.125
+  PREAMBLE_LENGTH: 256
+  MODULATION_FORMAT: "m7_apsk_constellation"
+  OSC_SCALE: 0.5 # V/div
+  POWER_MIN: 0.5  # minimum symbol power
+  POWER_MAX: 3.0  # maximum symbol power; at 3 the ±3 clip becomes apparent
+  JITTER_POWER: 0.1  # off-constellation complex noise on symbols (collection only); 0 disables
+  # DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260626_1835.zarr
+  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/dc0.122A_fmin300000_fmax1.3e+07_20260628_1234.zarr
+
+
+CHANNEL_GRID_SEARCH:
+  RECEPTIVE_FIELD: 20
+  VAL_FRACTION: 0.2
+  EXCLUDE_WARMUP: false       # drop the first receptive_field samples (causal warm-up,
+                             # zero-padded context) from the channel-model loss AND rRMSE.
+                            
+  # SELECTED_RUN_IDS:        # optional: pin exactly which channel runs advance to the
+  #   - tcn_1a2b3c4d         # encoder/decoder stage.
+  #   - gmp_5e6f7a8b        
+  models:
+    - model: gmp
+      params:
+        memory_linear: 49
+        memory_nonlinear: 49
+        nonlinearity_order: [3, 4]
+        cross_term_depth: [2, 16]
+        ridge: 1.0e-3
+
+    - model: tcn
+      params:
+        nlayers: [2, 3]
+        hidden_channels: [16]
+        kernel_size: [8]
+        dilation_base: 2
+        epochs: 100
+        lr: 1.0e-3
+        batch_size: 16
+        factor: 0.5 # Learning rate scheduler
+        patience: 3
+        min_lr: 1.0e-6
+        distribution: ["none", "gaussian", "students_t"]
+
+ENCODER_DECODER:
+  CONSTELLATION: qpsk
+  PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to +-this
+  params:
+    nlayers: [3]
+    dilation_base: [2]
+    kernel_size: [6]
+    hidden_channels: [16]
+    epochs: 200
+    lr: 1.0e-3
+    weight_decay: 1.0e-5    # AdamW L2 regularization; 0 disables. List -> swept.
+    batch_size: 16
+    factor: 0.5 # Learning rate scheduler
+    patience: 3
+    min_lr: 1.0e-6

@@ -103,7 +103,9 @@ if __name__ == '__main__':
                 awg_table_fraction=awg_table_fraction,
                 cyclic_prefix_fraction=cp_length_fraction,
                 upsample_factor=upsample_factor,
-                preamble_length=preamble_length
+                preamble_length=preamble_length,
+                power_min=getattr(cfg, 'POWER_MIN', None),
+                power_max=getattr(cfg, 'POWER_MAX', None),
             )
 
             f_AWG = mod_ofdm.awg_frequency
@@ -152,6 +154,7 @@ if __name__ == '__main__':
                 f_max=max_freq,
                 active_carrier_indices=mod_ofdm.subcarrier_indicies,
                 cyclic_prefix_length=mod_ofdm.cyclic_prefix_length,
+                preamble_length=preamble_length,
                 modulation_format=modulation_format,
                 dataset_path=dataset_path
             )

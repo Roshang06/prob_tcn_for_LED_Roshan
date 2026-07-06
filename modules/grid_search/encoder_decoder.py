@@ -15,11 +15,12 @@ import yaml
 from matplotlib.figure import Figure
 
 from modules.constellation_diagram import get_constellation
+from modules.experimental_blocks import band_limited_zc_preamble
 from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
 from modules.models import TCN
-from modules.utils import (calculate_BER, calculate_rrmse_pct_loss, in_band_time_loss,
+from modules.utils import (calculate_BER, calculate_rrmse_pct_loss, evm_pc, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time, correlation)
 
 ARCH_KEYS = ("nlayers", "dilation_base", "num_taps", "hidden_channels", "nonCausalPadding")
@@ -34,22 +35,26 @@ class EncoderDecoderGridSearch(GridSearchBase):
                  experiments_dir=None,
                  device="cpu",
                  seed=0,
-                 experiment_name="encoder_decoder"
+                 experiment_name="encoder_decoder",
+                 preamble_length=256,
+                 run_prefix=None,
                  ):
-    
+
         self.dataset_path = Path(dataset_path)
         self.channel_models = {cm["run_id"]: cm for cm in channel_models}
         self.constellation = get_constellation(grid_config["constellation"])
         self.preamble_amplitude = float(grid_config["preamble_amplitude"])
+        self.preamble_length = preamble_length
 
         ed_points = expand_grid([{"model": "tcn_ae", "params": grid_config["params"]}])
         points = [{**p, "channel_run_id": run_id} for p in ed_points for run_id in self.channel_models]
         shared_params = {k: v for k, v in grid_config.items() if k != "params"}
         super().__init__(points, grid_config, shared_params, experiments_dir, device, seed,
-                          experiment_name, extra_manifest={
+                          experiment_name, run_prefix=run_prefix, extra_manifest={
                               "dataset_path": str(self.dataset_path),
                               "channel_models": list(self.channel_models),
                           })
+        self.rank_by = "evm_pct"
 
     @classmethod
     def from_experiment_config(cls,
@@ -58,25 +63,40 @@ class EncoderDecoderGridSearch(GridSearchBase):
                                device=None,
                                seed=None,
                                experiment_name="encoder_decoder",
-                               experiments_dir=None
+                               experiments_dir=None,
+                               dataset_path=None,
+                               run_prefix=None,
                                ):
         '''
         Build the E/D grid from the ENCODER_DECODER section of the config,
         paired against an already-selected list of channel_models (see
         orchestrator.select_channel_models).
+
+        dataset_path overrides DATA_COLLECTION.DATASET_PATH from the config file;
+        use this when the dataset was just created and the YAML still shows null.
         '''
         with open(Path(config_path)) as f:
             full = yaml.safe_load(f)
         grid_config = {k.lower(): v for k, v in full["ENCODER_DECODER"].items()}
-        dataset_path = full["DATA_COLLECTION"]["DATASET_PATH"]
+        if dataset_path is None:
+            dataset_path = full["DATA_COLLECTION"]["DATASET_PATH"]
         device, seed = resolve_runtime(full, device, seed)
         return cls(grid_config, channel_models=channel_models, dataset_path=dataset_path,
                    device=device, seed=seed, experiment_name=experiment_name,
-                   experiments_dir=experiments_dir)
+                   experiments_dir=experiments_dir,
+                   preamble_length=int(full["DATA_COLLECTION"]["PREAMBLE_LENGTH"]),
+                   run_prefix=run_prefix)
 
     def _prepare(self, ofdm_config=None):
         if ofdm_config is None:
             _, _, ofdm_config = load_ofdm_dataset(str(self.dataset_path), self.device)
+        # band-limited ZC preamble (identical to ModulateDataOFDM) prepended to every
+        # training burst so the encoder/decoder learn to preserve it for hardware sync
+        fs = ofdm_config.baseband_fft_length * ofdm_config.subcarrier_spacing
+        freqs = ofdm_config.subcarrier_freqs_hz
+        preamble = band_limited_zc_preamble(self.preamble_length, fs,
+                                            float(freqs.min()), float(freqs.max()), self.preamble_amplitude)
+        self.preamble = torch.tensor(preamble, dtype=torch.float32, device=self.device).unsqueeze(0)
         loaded = {}
         for run_id, cm in self.channel_models.items():
             model = MODEL_REGISTRY[cm["model"]].load(cm["params"], cm["checkpoint"], self.device).model
@@ -91,21 +111,28 @@ class EncoderDecoderGridSearch(GridSearchBase):
         true_frame = torch.tensor(np.stack(symbols), dtype=torch.complex64, device=self.device)
         sent_time = symbols_to_time(true_frame, ofdm_config.num_leading_zeros, ofdm_config.num_trailing_zeros)
         sent_time = torch.hstack((sent_time[:, -ofdm_config.cyclic_prefix_length:], sent_time))
+        sent_time = torch.hstack((self.preamble.expand(batch_size, -1), sent_time))  # [preamble | CP | symbol]
         return torch.tensor(true_bits, device=self.device), sent_time
 
     def _forward(self, encoder, decoder, channel_model, sent_time):
-        encoded_time = encoder(sent_time).clamp(-self.preamble_amplitude, self.preamble_amplitude)
-        channel_out = channel_model(encoded_time)
-        received_time = channel_out[0] if isinstance(channel_out, tuple) else channel_out
-        return decoder(received_time)
+        # encode, pass through the channel, and decode only the OFDM symbol (CP + payload);
+        # the preamble is never processed
+        pre = self.preamble_length
+        preamble, symbol = sent_time[:, :pre], sent_time[:, pre:]
+        encoded_symbol = encoder(symbol).clamp(-self.preamble_amplitude, self.preamble_amplitude)
+        channel_out = channel_model(encoded_symbol)
+        received_symbol = channel_out[0] if isinstance(channel_out, tuple) else channel_out
+        decoded_symbol = decoder(received_symbol)
+        return torch.hstack((preamble, decoded_symbol))
 
     def _frame_to_freq(self, time_frame, ofdm_config):
         '''
-        CP-strip + FFT a (batch, frame) time signal down to the symbols carried
+        Strip the preamble + CP, then FFT the OFDM symbol down to the symbols carried
         on the active subcarriers
         '''
-        freq = torch.fft.fft(time_frame[:, ofdm_config.cyclic_prefix_length:], norm="ortho", dim=-1)
-        return freq[:, ofdm_config.active_carrier_indices]
+        start = self.preamble_length + ofdm_config.cyclic_prefix_length
+        symbol = time_frame[:, start:start + ofdm_config.baseband_fft_length]
+        return torch.fft.fft(symbol, norm="ortho", dim=-1)[:, ofdm_config.active_carrier_indices]
 
     def _decode_freq(self, encoder, decoder, channel_model, sent_time, ofdm_config):
         '''
@@ -198,6 +225,15 @@ class EncoderDecoderGridSearch(GridSearchBase):
                                  lr=float(p["lr"]),
                                  weight_decay=float(p.get("weight_decay", 0.0)))
 
+        scheduler = None
+        if "patience" in p:
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="min",
+                factor=float(p.get("factor", 0.5)),
+                patience=int(p["patience"]),
+                min_lr=float(p.get("min_lr", 1e-6)),
+            )
+
         num_bits = len(ofdm_config.active_carrier_indices) * self.constellation.bits_per_symbol
         batch_size = p["batch_size"]
 
@@ -207,21 +243,32 @@ class EncoderDecoderGridSearch(GridSearchBase):
 
         encoder.train()
         decoder.train()
-        history = {"loss": [], "ber": []}
+        history = {"loss": [], "ber": [], "lr": []}
         for _ in range(p["epochs"]):
             _, sent_time = self._sample_batch(batch_size, num_bits, ofdm_config)
             decoded_time = self._forward(encoder, decoder, channel_model, sent_time)
-            loss = in_band_time_loss(sent_time, decoded_time, ofdm_config.active_carrier_indices, ofdm_config.baseband_fft_length, p["num_taps"])
+            # loss on the OFDM symbol only; the preamble is never encoded/decoded
+            offset = self.preamble_length
+            loss = in_band_time_loss(sent_time[:, offset:], decoded_time[:, offset:],
+                                     ofdm_config.active_carrier_indices, ofdm_config.baseband_fft_length)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step(loss.item())
             history["loss"].append(loss.item())
             history["ber"].append(self._test_ber(encoder, decoder, channel_model, ofdm_config, eval_bits, eval_sent_time))
+            history["lr"].append(optimizer.param_groups[0]["lr"])
 
         metrics = self._evaluate(encoder, decoder, channel_model, ofdm_config, num_bits, batch_size)
         metrics["num_params"] = encoder.get_num_params() + decoder.get_num_params()
         metrics["channel_run_id"] = point["channel_run_id"]
+
+        # propagate channel model metadata
+        ch_meta = self.channel_models[point["channel_run_id"]]
+        metrics["channel_receptive_field"] = ch_meta.get("receptive_field")
+        metrics["channel_distribution"] = ch_meta.get("distribution", "none")
 
         torch.save({"encoder": encoder.state_dict(), "decoder": decoder.state_dict()}, run_dir / "model.pt")
         self._write_history(run_dir, history)
@@ -230,7 +277,10 @@ class EncoderDecoderGridSearch(GridSearchBase):
             sent_freq = self._frame_to_freq(eval_sent_time, ofdm_config)
             decoded_time_eval = self._forward(encoder.eval(), decoder.eval(), channel_model, eval_sent_time)
             recv_freq = self._decode_freq(encoder.eval(), decoder.eval(), channel_model, eval_sent_time, ofdm_config)
-        self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz)
+            evm = evm_pct(sent_freq, recv_freq).item()
+        ch_model_type = f"{ch_meta.get('model', 'channel').upper()} {ch_meta.get('distribution', 'none')}"
+        self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz,
+                                 channel_id=point["channel_run_id"], channel_type=ch_model_type, evm=evm)
         self._plot_delay_correlation(run_dir, eval_sent_time, decoded_time_eval)
         self._plot_position_error(run_dir, eval_sent_time, decoded_time_eval, ofdm_config.cyclic_prefix_length)
         return metrics
@@ -249,21 +299,37 @@ class EncoderDecoderGridSearch(GridSearchBase):
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
         fig.savefig(run_dir / "plots" / "ber.png", dpi=120)
 
-    def _plot_constellation(self, run_dir, sent, received, freqs):
+    def _plot_constellation(self, run_dir, sent, received, freqs, channel_id=None, channel_type=None, evm=None):
         '''Sent vs received QPSK symbols on the active carriers, coloured by
-        carrier frequency (cf. experimental_blocks.PlotConstellations).'''
+        carrier frequency. Received plot overlays sent symbols as red X markers for reference.'''
         sent_np = sent.detach().cpu().numpy()
         recv_np = received.detach().cpu().numpy()
         # one frequency value per symbol, tiled across the batch to match ravel order
         c = np.tile(freqs.detach().cpu().numpy(), sent_np.shape[0])
-        sent_np, recv_np = sent_np.ravel(), recv_np.ravel()
+        sent_np_flat = sent_np.ravel()
+        recv_np_flat = recv_np.ravel()
 
         fig = Figure(figsize=(11, 5))
         ax_sent, ax_recv = fig.subplots(1, 2)
-        ax_sent.scatter(sent_np.real, sent_np.imag, s=10, c=c, cmap="viridis")
+        ax_sent.scatter(sent_np_flat.real, sent_np_flat.imag, s=10, c=c, cmap="viridis")
         ax_sent.set_title("Sent")
-        sc = ax_recv.scatter(recv_np.real, recv_np.imag, s=10, c=c, cmap="viridis")
-        ax_recv.set_title("Received")
+        sc = ax_recv.scatter(recv_np_flat.real, recv_np_flat.imag, s=10, c=c, cmap="viridis")
+        # overlay reference constellation symbols as red X's
+        ax_recv.scatter(sent_np_flat.real, sent_np_flat.imag, s=30, marker="x", c="red", linewidth=1.5, alpha=0.7, label="Reference")
+
+        title = "Received"
+        if channel_id or channel_type or evm is not None:
+            parts = []
+            if channel_id:
+                parts.append(channel_id)
+            if channel_type:
+                parts.append(channel_type)
+            if evm is not None:
+                parts.append(f"EVM={evm:.2f}%")
+            title = "Received (" + " | ".join(parts) + ")"
+        ax_recv.set_title(title)
+        ax_recv.legend(fontsize=8, loc="upper right")
+
         for ax in (ax_sent, ax_recv):
             ax.set_xlabel("In-Phase")
             ax.set_ylabel("Quadrature")

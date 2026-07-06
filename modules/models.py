@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -62,14 +64,14 @@ class TCNBlock(nn.Module):
         return out + x # residual connection
 
 class TCN(nn.Module):
-    def __init__(self, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32, nonCausalPadding=0):
+    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32, nonCausalPadding=0):
         super().__init__()
         layers = []
         in_channels = 1
         for i in range(nlayers):
             dilation = dilation_base ** i
             layers.append(
-                TCNBlock(in_channels, hidden_channels, num_taps, dilation, nonCausalPadding)
+                TCNBlock(in_channels, hidden_channels, kernel_size, dilation, nonCausalPadding)
             )
             in_channels = hidden_channels
         self.tcn = nn.Sequential(*layers)
@@ -79,7 +81,7 @@ class TCN(nn.Module):
         self.receptive_field = 1
         for i in range(nlayers):
             dilation = dilation_base ** i
-            self.receptive_field += (num_taps - 1) * dilation
+            self.receptive_field += (kernel_size - 1) * dilation
 
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]
@@ -95,7 +97,7 @@ class TCN(nn.Module):
         return total_params
 
 class TCN_channel(nn.Module):
-    def __init__(self, nlayers=3, dilation_base=2, num_taps=10,
+    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10,
                  hidden_channels=32, learn_noise=False, gaussian=True):
         super().__init__()
         layers = []
@@ -103,7 +105,7 @@ class TCN_channel(nn.Module):
         for i in range(nlayers):
             dilation = dilation_base ** i
             layers.append(
-                TCNBlock(in_channels, hidden_channels, num_taps, dilation)
+                TCNBlock(in_channels, hidden_channels, kernel_size, dilation)
             )
             in_channels = hidden_channels
         self.learn_noise = learn_noise
@@ -112,14 +114,14 @@ class TCN_channel(nn.Module):
             self.readout = nn.Conv1d(hidden_channels, 2, kernel_size=1) # 2 channels mean | std
         else:
             self.readout = nn.Conv1d(hidden_channels, 3, kernel_size=1) # 3 channels mean | std | nu
-        self.num_taps = num_taps
+        self.kernel_size = kernel_size
         self.gaussian = gaussian
 
         # Calculate the total receptive field for the whole TCN stack
         self.receptive_field = 1
         for i in range(nlayers):
             dilation = dilation_base ** i
-            self.receptive_field += (num_taps - 1) * dilation
+            self.receptive_field += (kernel_size - 1) * dilation
 
         if not gaussian:
             with torch.no_grad():
@@ -177,6 +179,218 @@ class TCN_channel(nn.Module):
             return noisy_out, mean_out, std_out, nu_out
         else:
             return mean_out
+
+    def get_num_params(self):
+        total_params = 0
+        for param in self.parameters():
+            total_params += param.numel()
+        return total_params
+
+
+def _complex_diag_scan(a_re, a_im, b_re, b_im):
+    '''Inclusive parallel prefix scan of the diagonal linear recurrence
+        x_k = a_k * x_{k-1} + b_k          (all complex, elementwise / diagonal)
+    for every batch and state channel at once, using the Hillis-Steele doubling
+    scheme (O(T log T), fully differentiable, no Python loop over time).
+
+    a_*, b_* have shape [*, T, N] (a may broadcast on the batch dim). The monoid
+    combine is the same associative operator as the reference LRU parallel scan:
+    composing (a_i, b_i) then (a_j, b_j) gives (a_j a_i, a_j b_i + b_j). Returns the
+    scanned additive component (b), i.e. the state sequence x_k, as (re, im).
+
+    Complex numbers are carried as separate real/imag tensors so the whole thing
+    runs on MPS, which lacks solid native complex support (cf. the Student-t path).
+    '''
+    T = a_re.shape[-2]
+    d = 1
+    while d < T:
+        # shift right by d along time; the missing left neighbour is the monoid
+        # identity (multiplier 1, addend 0), so pad a with 1 and b with 0.
+        pa_re = F.pad(a_re, (0, 0, d, 0), value=1.0)[..., :T, :]
+        pa_im = F.pad(a_im, (0, 0, d, 0), value=0.0)[..., :T, :]
+        pb_re = F.pad(b_re, (0, 0, d, 0), value=0.0)[..., :T, :]
+        pb_im = F.pad(b_im, (0, 0, d, 0), value=0.0)[..., :T, :]
+
+        # new_a = a * pa ; new_b = a * pb + b   (complex mult, current=right operand)
+        new_a_re = a_re * pa_re - a_im * pa_im
+        new_a_im = a_re * pa_im + a_im * pa_re
+        new_b_re = a_re * pb_re - a_im * pb_im + b_re
+        new_b_im = a_re * pb_im + a_im * pb_re + b_im
+
+        a_re, a_im, b_re, b_im = new_a_re, new_a_im, new_b_re, new_b_im
+        d *= 2
+    return b_re, b_im
+
+
+class LRU(nn.Module):
+    '''Linear Recurrent Unit layer (Orvieto et al., 2023). A linear diagonal
+    complex-state recurrence run with a parallel scan, plus a skip-connected
+    output projection.
+
+    The complex arithmetic is kept as explicit real/imag pairs for MPS support.
+
+    N = state_dim (recurrent state size), H = model_dim (in/out feature size).
+    Input/output are real sequences of shape [B, T, H].
+    '''
+    def __init__(self, state_dim, model_dim, r_min=0.0, r_max=1.0, max_phase=6.28):
+        super().__init__()
+        N, H = state_dim, model_dim
+        self.N = N
+        self.H = H
+
+        # Lambda ~ uniform on the complex ring between r_min and r_max, phase in
+        # [0, max_phase]; stored as its stable log-parametrisation (nu, theta).
+        u1 = torch.rand(N)
+        u2 = torch.rand(N)
+
+        nu_log = torch.log(-0.5 * torch.log(u1 * (r_max ** 2 - r_min ** 2) + r_min ** 2))
+        theta_log = torch.log(max_phase * u2)
+        self.nu_log = nn.Parameter(nu_log)
+        self.theta_log = nn.Parameter(theta_log)
+
+        # Glorot-initialised input/output projections (real + imag parts).
+        self.B_re = nn.Parameter(torch.randn(N, H) / math.sqrt(2 * H))
+        self.B_im = nn.Parameter(torch.randn(N, H) / math.sqrt(2 * H))
+        self.C_re = nn.Parameter(torch.randn(H, N) / math.sqrt(N))
+        self.C_im = nn.Parameter(torch.randn(H, N) / math.sqrt(N))
+        self.D = nn.Parameter(torch.randn(H))
+
+        # Normalization of the recurrence
+        diag_lambda = torch.exp(-torch.exp(nu_log) + 1j * torch.exp(theta_log))
+        gamma_log = torch.log(torch.sqrt(1 - torch.abs(diag_lambda) ** 2) + 1e-8)
+        self.gamma_log = nn.Parameter(gamma_log)
+
+    def forward(self, u):
+        # u: [B, T, H]
+        B, T, _ = u.shape
+        N = self.N
+
+        # Materialize diagonal lambda 
+        modulus = torch.exp(-torch.exp(self.nu_log))          # [N]
+        phase = torch.exp(self.theta_log)                     # [N]
+        lam_re = modulus * torch.cos(phase)
+        lam_im = modulus * torch.sin(phase)
+
+        # Normalized input projection B_norm = (B_re + iB_im) * exp(gamma).
+        gamma = torch.exp(self.gamma_log).unsqueeze(-1)       # [N, 1]
+        Bn_re = self.B_re * gamma
+        Bn_im = self.B_im * gamma
+
+        # Bu_k = B_norm @ u_k for the whole sequence (u is real): [B, T, N].
+        Bu_re = u @ Bn_re.t()
+        Bu_im = u @ Bn_im.t()
+
+        # Lambda is time-invariant: broadcast it across time (batch dim stays 1).
+        a_re = lam_re.view(1, 1, N).expand(1, T, N)
+        a_im = lam_im.view(1, 1, N).expand(1, T, N)
+        x_re, x_im = _complex_diag_scan(a_re, a_im, Bu_re, Bu_im)  # states x_k
+
+        # y_k = Re(C @ x_k) + D * u_k.
+        y = x_re @ self.C_re.t() - x_im @ self.C_im.t()       # [B, T, H]
+        y = y + u * self.D
+        return y
+
+
+class LRUBlock(nn.Module):
+    '''One residual LRU block: pre-norm -> LRU -> GELU -> GLU, as in the paper.'''
+    def __init__(self, state_dim, model_dim, dropout=0.0,
+                 r_min=0.0, r_max=1.0, max_phase=6.28):
+        super().__init__()
+        self.norm = nn.LayerNorm(model_dim)
+        self.lru = LRU(state_dim, model_dim, r_min, r_max, max_phase)
+        self.glu_w = nn.Linear(model_dim, model_dim)
+        self.glu_v = nn.Linear(model_dim, model_dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x):
+        z = self.norm(x)
+        z = self.lru(z)
+        z = self.drop(F.gelu(z))
+        z = self.glu_w(z) * torch.sigmoid(self.glu_v(z))      # gated linear unit
+        z = self.drop(z)
+        return x + z                                          # residual connection
+
+
+class LRU_channel(nn.Module):
+    '''Stacked Linear Recurrent Unit channel model, a modern deep state-space /
+    linear-RNN baseline to sit alongside TCN_channel and the memory polynomials.
+
+    Mirrors TCN_channel's I/O contract so it drops into the same grid-search
+    adapter: input [B, T], and either returns a centred deterministic estimate
+    `mean_out` (learn_noise=False) or the probabilistic tuple
+    (noisy_out, mean_out, std_out, nu_out) with a Gaussian (gaussian=True) or
+    Student-t (gaussian=False) observation model (learn_noise=True).
+    '''
+    def __init__(self, state_dim=64, hidden_dim=64, n_layers=2, dropout=0.0,
+                 r_min=0.0, r_max=1.0, max_phase=6.28,
+                 learn_noise=False, gaussian=True):
+        super().__init__()
+        self.learn_noise = learn_noise
+        self.gaussian = gaussian
+
+        self.encoder = nn.Linear(1, hidden_dim)               # per-timestep 1 -> H
+        self.blocks = nn.ModuleList([
+            LRUBlock(state_dim, hidden_dim, dropout, r_min, r_max, max_phase)
+            for _ in range(n_layers)
+        ])
+        # readout channels: mean | (mean, std) | (mean, std, nu)
+        if not learn_noise:
+            out_channels = 1
+        elif gaussian:
+            out_channels = 2
+        else:
+            out_channels = 3
+        self.readout = nn.Linear(hidden_dim, out_channels)
+        self.receptive_field = 1
+
+        if learn_noise and not gaussian:
+            with torch.no_grad():
+                # Bias nu large so the Student-t starts near-Gaussian (stability).
+                self.readout.bias[2].fill_(48)
+
+    def sample_student_t_pytorch(self, mean, std, nu):
+        '''Samples from a Student's t via PyTorch's built-in dist; rsample()
+        keeps gradients flowing through std and nu.'''
+        nu = torch.clamp(nu, min=2.001)
+        std = torch.clamp(std, min=1e-6)
+        dist = StudentT(df=nu, loc=mean, scale=std)
+        return dist.rsample()
+
+    def sample_student_t_mps(self, mean, std, nu):
+        '''Wilson-Hilferty chi^2 approximation for a scaled/shifted Student-t
+        (StudentT.rsample is unsupported on MPS).'''
+        z = torch.randn_like(mean)
+        z_chi = torch.randn_like(mean)
+        chi2_approx = nu * (1 - 2 / (9 * nu) + z_chi * torch.sqrt(2 / (9 * nu))).pow(3)
+        scale = torch.sqrt(nu / (chi2_approx + 1e-6))
+        return mean + std * z * scale
+
+    def forward(self, xin):
+        # xin: [B, T]
+        x = self.encoder(xin.unsqueeze(-1))                   # [B, T, H]
+        for block in self.blocks:
+            x = block(x)
+        out = self.readout(x)                                 # [B, T, out_channels]
+
+        mean_out = out[..., 0]                                # [B, T]
+        mean_out = mean_out - mean_out.mean(dim=1, keepdim=True)
+        if not self.learn_noise:
+            return mean_out
+
+        std_out = torch.exp(out[..., 1])
+        if self.gaussian:
+            z = torch.randn_like(mean_out)
+            noisy_out = mean_out + std_out * z
+            nu_out = torch.full_like(mean_out, float('inf'))  # nu = inf for Gaussian
+        else:
+            nu_out = torch.nn.functional.softplus(out[..., 2])
+            nu_out = torch.clamp(nu_out, 2, 50)               # nu between 2 and 50
+            if xin.device.type == "mps":
+                noisy_out = self.sample_student_t_mps(mean_out, std_out, nu_out)
+            else:
+                noisy_out = self.sample_student_t_pytorch(mean_out, std_out, nu_out)
+
+        return noisy_out, mean_out, std_out, nu_out
 
     def get_num_params(self):
         total_params = 0

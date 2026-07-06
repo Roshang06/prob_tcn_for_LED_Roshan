@@ -26,3 +26,4 @@ dependencies:
       - torchaudio==2.4.1
       - pyvisa
       - pyflux @ git+https://github.com/UW-Photonics-Lab/PyFlux.git@prototype/v1
+      - -e .   # this repo, editable: makes `import modules` resolve from any cwd

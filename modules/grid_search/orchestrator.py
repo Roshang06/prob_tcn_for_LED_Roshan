@@ -45,7 +45,8 @@ class ChannelModelGridSearch(GridSearchBase):
                  device="cpu",
                  seed=0,
                  experiment_name="channel_models",
-                 val_fraction=None
+                 val_fraction=None,
+                 run_prefix=None,
                  ):
 
         self.dataset_path = Path(dataset_path)
@@ -56,30 +57,37 @@ class ChannelModelGridSearch(GridSearchBase):
         # setting (e.g. RECEPTIVE_FIELD) handed to every adapter via from_config(shared=...)
         shared_params = {k: v for k, v in grid_config.items() if k not in self._ORCHESTRATOR_KEYS}
         super().__init__(points, grid_config, shared_params, experiments_dir, device, seed,
-                          experiment_name, extra_manifest={
+                          experiment_name, run_prefix=run_prefix, extra_manifest={
                               "dataset_path": str(self.dataset_path),
                               "val_fraction": self.val_fraction,
                           })
 
     @classmethod
-    def from_experiment_config(cls, 
+    def from_experiment_config(cls,
                                config_path,
                                device=None,
                                seed=None,
                                experiment_name="channel_models",
-                               experiments_dir=None
+                               experiments_dir=None,
+                               dataset_path=None,
+                               run_prefix=None,
                                ):
-        '''Build the grid search from the unified end-to-end config'''
-    
+        '''Build the grid search from the unified end-to-end config.
+
+        dataset_path overrides DATA_COLLECTION.DATASET_PATH from the config file;
+        use this when the dataset was just created and the YAML still shows null.
+        '''
         with open(Path(config_path)) as f:
             full = yaml.safe_load(f)
-    
+
         grid_config = full["CHANNEL_GRID_SEARCH"]
-        dataset_path = full["DATA_COLLECTION"]["DATASET_PATH"]
+        if dataset_path is None:
+            dataset_path = full["DATA_COLLECTION"]["DATASET_PATH"]
         device, seed = resolve_runtime(full, device, seed)
-        
+
         return cls(grid_config, dataset_path=dataset_path, device=device, seed=seed,
-                   experiment_name=experiment_name, experiments_dir=experiments_dir)
+                   experiment_name=experiment_name, experiments_dir=experiments_dir,
+                   run_prefix=run_prefix)
 
     # ------------------------------------------------------------- data/eval
     def _prepare(self, data=None):
@@ -89,7 +97,10 @@ class ChannelModelGridSearch(GridSearchBase):
         if data is not None:
             sent, received = data
         else:
-            sent, received, _ = load_ofdm_dataset(str(self.dataset_path), self.device)
+            sent, received, config = load_ofdm_dataset(str(self.dataset_path), self.device)
+            # channel model trains on the OFDM symbol only (CP + payload); drop the preamble
+            preamble_length = sent.shape[1] - config.baseband_fft_length - config.cyclic_prefix_length
+            sent, received = sent[:, preamble_length:], received[:, preamble_length:]
         return self._split_train_val(sent, received)
 
     def _split_train_val(self, X, Y):
@@ -106,7 +117,13 @@ class ChannelModelGridSearch(GridSearchBase):
         y_pred = adapter.predict(X)
         if isinstance(y_pred, tuple):  # TCN learn_noise: (noisy, mean, std, nu)
             y_pred = y_pred[1]
-        return {"rrmse_pct": calculate_rrmse_pct_loss(Y.to(y_pred.device), y_pred)}
+        Y = Y.to(y_pred.device)
+        # keep rRMSE consistent with training: when warm-up is excluded from the loss,
+        # exclude it from the metric too
+        if getattr(adapter, "exclude_warmup", False):
+            s = adapter._warmup_slice(y_pred.shape[-1])
+            y_pred, Y = y_pred[..., s:], Y[..., s:]
+        return {"rrmse_pct": calculate_rrmse_pct_loss(Y, y_pred)}
 
     # ----------------------------------------------------------------- run
     def _run_point(self, point, run_dir, context) -> dict:
@@ -124,6 +141,19 @@ class ChannelModelGridSearch(GridSearchBase):
             if val_nll is not None:
                 metrics["val_nll"] = val_nll
         metrics["num_params"] = int(adapter.num_params())
+
+        # receptive field (TCN uses model attribute; GMP uses max memory + 1)
+        model_type = point["model"]
+        if model_type == "tcn":
+            metrics["receptive_field"] = int(adapter.model.receptive_field)
+        elif model_type == "gmp":
+            mem_lin = point["params"].get("memory_linear", 0)
+            mem_nonlin = point["params"].get("memory_nonlinear", 0)
+            metrics["receptive_field"] = max(mem_lin, mem_nonlin) + 1
+
+        # distribution (for GMP always "none"; for TCN track the learned noise type)
+        dist = point["params"].get("distribution", "none")
+        metrics["distribution"] = dist
 
         adapter.save(run_dir / "model.pt")
         self._write_history(run_dir, history)
@@ -171,5 +201,7 @@ def select_channel_models(exp_dir, mode="best", metric="val_rrmse_pct", run_ids=
             "model": row["model"],
             "params": params,
             "checkpoint": run_dir / "model.pt",
+            "receptive_field": row.get("receptive_field"),
+            "distribution": row.get("distribution", "none"),
         })
     return selected

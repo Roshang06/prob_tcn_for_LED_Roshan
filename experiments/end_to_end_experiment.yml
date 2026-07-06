@@ -24,6 +24,8 @@ DATA_COLLECTION:
   PREAMBLE_LENGTH: 256
   MODULATION_FORMAT: "qpsk"
   OSC_SCALE: 0.2
+  POWER_MIN: 0.5  # minimum symbol power
+  POWER_MAX: 3.0  # maximum symbol power; at 3 the ±3 clip becomes apparent
   DATASET_PATH: "/home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/dc0.122A_fmin300000_fmax1.299e+07_20260615_1430.zarr"
 
 CHANNEL_GRID_SEARCH:
@@ -45,10 +47,13 @@ CHANNEL_GRID_SEARCH:
       params:
         nlayers: [2, 3]
         hidden_channels: [16, 32]
-        num_taps: 10
+        kernel_size: 10
         dilation_base: 2
         epochs: 200
         lr: 1.0e-3
+        factor: 0.5
+        patience: 5
+        min_lr: 1.0e-6
 
 ENCODER_DECODER:
   CONSTELLATION: qpsk
@@ -56,7 +61,7 @@ ENCODER_DECODER:
   params:
     nlayers: [2, 3]
     dilation_base: 2
-    num_taps: 5
+    kernel_size: 5
     hidden_channels: 8
     epochs: 100
     lr: 1.0e-3

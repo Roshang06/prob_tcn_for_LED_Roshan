@@ -23,6 +23,37 @@ import yaml
 
 _REPO_DIR = Path(__file__).resolve().parents[2]
 
+_ADJECTIVES = [
+    "amber", "azure", "bold", "brisk", "calm", "crisp", "dawn", "deep",
+    "deft", "dim", "dry", "dusk", "fair", "fast", "firm", "fleet", "free",
+    "fresh", "full", "glad", "gold", "grey", "high", "keen", "kind", "late",
+    "lean", "light", "long", "low", "mild", "mint", "mist", "mute", "neat",
+    "new", "nice", "nifty", "noble", "north", "old", "open", "pale", "plain",
+    "prime", "pure", "quick", "quiet", "raw", "rich", "ripe", "rough", "round",
+    "royal", "safe", "sage", "sharp", "sleek", "slim", "slow", "small", "smart",
+    "soft", "solar", "solid", "spare", "stark", "steady", "still", "stone",
+    "swift", "tall", "tame", "taut", "thin", "tidy", "tiny", "true", "vast",
+    "warm", "wide", "wild", "wise", "young",
+]
+_NOUNS = [
+    "arc", "bay", "beam", "birch", "brook", "cliff", "cloud", "coast", "comet",
+    "creek", "crest", "dawn", "dell", "drift", "dune", "dust", "echo", "elm",
+    "fern", "field", "fjord", "flame", "flare", "fleet", "flint", "flood",
+    "flow", "foam", "fold", "forge", "frost", "gale", "glade", "glen", "glow",
+    "gorge", "grove", "gulf", "haze", "heath", "hill", "isle", "lake", "lane",
+    "leaf", "ledge", "mast", "mesa", "mist", "moon", "moor", "moss", "peak",
+    "pine", "plain", "pond", "pulse", "rain", "reef", "ridge", "rift", "ring",
+    "rise", "river", "rock", "root", "rush", "sand", "sea", "shade", "shore",
+    "slope", "snow", "sol", "spark", "spire", "spring", "star", "stem", "stone",
+    "storm", "stream", "summit", "sun", "surf", "tide", "trail", "vale", "vault",
+    "wave", "wind", "wood",
+]
+
+
+def generate_run_name() -> str:
+    """Return a short random name in the style of wandb run names (adj_noun)."""
+    return f"{random.choice(_ADJECTIVES)}_{random.choice(_NOUNS)}"
+
 
 def _git_hash():
     try:
@@ -40,7 +71,7 @@ def run_id(point: dict) -> str:
 
 class GridSearchBase:
     def __init__(self, points, grid_manifest, shared_params, experiments_dir,
-                 device, seed, experiment_name, extra_manifest=None):
+                 device, seed, experiment_name, extra_manifest=None, run_prefix=None):
         self.points = points
         self.grid_manifest = grid_manifest
         self.shared_params = shared_params
@@ -50,7 +81,8 @@ class GridSearchBase:
 
         base = Path(experiments_dir) if experiments_dir else _REPO_DIR / "data" / "experiments"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        self.exp_dir = base / f"{experiment_name}_{timestamp}"
+        prefix = f"{run_prefix}_" if run_prefix else ""
+        self.exp_dir = base / f"{prefix}{experiment_name}_{timestamp}"
         self.runs_dir = self.exp_dir / "runs"
         self.summary_dir = self.exp_dir / "summary"
         self.runs_jsonl = self.exp_dir / "runs.jsonl"
@@ -91,6 +123,8 @@ class GridSearchBase:
             for i in range(n):
                 w.writerow([i, *(history[k][i] for k in history)])
         self._plot_history(run_dir, history)
+        if "lr" in history:
+            self._plot_lr(run_dir, history["lr"])
 
     def _plot_history(self, run_dir: Path, history: dict):
         '''Save a train/validation loss-vs-epoch curve under plots/ for trainable
@@ -115,6 +149,18 @@ class GridSearchBase:
         plots_dir.mkdir(parents=True, exist_ok=True)
         fig.savefig(plots_dir / "loss.png", dpi=120)
 
+    def _plot_lr(self, run_dir: Path, lr_values: list):
+        fig = Figure(figsize=(7, 3))
+        ax = fig.subplots()
+        ax.plot(range(len(lr_values)), lr_values, marker=".", ms=3)
+        ax.set_xlabel("epoch")
+        ax.set_ylabel("learning rate")
+        ax.set_title(run_dir.name)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        fig.savefig(run_dir / "plots" / "lr.png", dpi=120)
+
     def _append_run_record(self, rid, point, metrics):
         record = {"run_id": rid, "model": point["model"], **point["params"], **metrics}
         with open(self.runs_jsonl, "a") as f:
@@ -126,6 +172,9 @@ class GridSearchBase:
         rows = [json.loads(line) for line in self.runs_jsonl.read_text().splitlines() if line.strip()]
         if not rows:
             return
+        rank_by = getattr(self, "rank_by", None)
+        if rank_by:
+            rows.sort(key=lambda r: r.get(rank_by, float("inf")))
         cols = list(dict.fromkeys(k for r in rows for k in r))  # union, order-preserving
         with open(self.summary_dir / "leaderboard.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=cols)

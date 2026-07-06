@@ -1,0 +1,19 @@
+# Editable-install config so `import modules` resolves from any cwd / launch method.
+# Runtime dependencies are managed by environment.yml (conda); intentionally not
+# duplicated here, mirroring the PyFlux package.
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prob-tcn-for-led"
+version = "0.1.0"
+description = "Probabilistic TCN channel models and encoder/decoder equalizers for microLED OFDM links"
+authors = [{name = "UW-Photonics-Lab", email = "ddj123@uw.edu"}]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["modules*"]
