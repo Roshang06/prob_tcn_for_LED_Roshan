@@ -20,10 +20,10 @@ from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
 from modules.models import TCN
-from modules.utils import (calculate_BER, calculate_rrmse_pct_loss, evm_pc, in_band_time_loss,
+from modules.utils import (calculate_BER, calculate_rrmse_pct_loss, evm_pct, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time, correlation)
 
-ARCH_KEYS = ("nlayers", "dilation_base", "num_taps", "hidden_channels", "nonCausalPadding")
+ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "nonCausalPadding")
 
 
 class EncoderDecoderGridSearch(GridSearchBase):

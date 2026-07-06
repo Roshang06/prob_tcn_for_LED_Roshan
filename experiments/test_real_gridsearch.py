@@ -31,7 +31,7 @@ from modules.experimental_blocks import ModulateDataOFDM
 from pyflux.core.block import Signal
 
 # ── Experiment output ────────────────────────────────────────────────────────
-EXP_DIR   = Path("data/experiments/test_gridsearch")
+EXP_DIR   = Path("data/experiments/test_real_gridsearch")
 DEVICE    = "cuda"
 SEED      = 42
 
@@ -102,7 +102,7 @@ CHANNEL_GRID = {
             "params": {
                 "nlayers":          [2, 3],
                 "dilation_base":    2,
-                "num_taps":         5,
+                "kernel_size":         5,
                 "hidden_channels":  [8, 16],
                 "learn_noise":      False,
                 "gaussian":         True,
@@ -121,6 +121,22 @@ CHANNEL_GRID = {
                 "ridge":               1e-3,
             },
         },
+        {
+            "model": "lru",
+            "params": {
+                "state_dim":        [4, 8],
+                "hidden_dim":       8,
+                "n_layers":         2,
+                "dropout":          0.0,
+                "distribution":     "none",
+                "epochs":           100,
+                "lr":               1e-3,
+                "batch_size":       16,
+                "factor":           0.5,
+                "patience":         5,
+                "min_lr":           1e-6,
+            },
+        },
     ]
 }
 
@@ -130,13 +146,13 @@ ENCODER_DECODER_GRID = {
     "params": {
         "nlayers":         [2, 3],
         "dilation_base":   2,
-        "num_taps":        5,
-        "hidden_channels": 8,
+        "kernel_size":     5,
+        "hidden_channels": [4, 8],
         "epochs":          500,
         "lr":              1e-3,
         "weight_decay":    1e-5,
         "batch_size":      8,
-        "nonCausalPadding": [0]
+        "nonCausalPadding": 0
     },
 }
 

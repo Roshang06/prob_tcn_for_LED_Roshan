@@ -162,12 +162,12 @@ ENCODER_DECODER_GRID = {
         "nlayers":         [2],
         "dilation_base":   2,
         "kernel_size":     10,
-        "hidden_channels": 4,
+        "hidden_channels": [4, 8],
         "epochs":          1000,
         "lr":              1e-3,
         "weight_decay":    1e-5,
         "batch_size":      8,
-        "nonCausalPadding": [0, 1]
+        "nonCausalPadding": 0
     },
 }
 
