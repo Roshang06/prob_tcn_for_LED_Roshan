@@ -77,7 +77,7 @@ class ChannelModelGridSearch(GridSearchBase):
         dataset_path overrides DATA_COLLECTION.DATASET_PATH from the config file;
         use this when the dataset was just created and the YAML still shows null.
         '''
-        with open(Path(config_path)) as f:
+        with open(Path(config_path), encoding="utf-8") as f:
             full = yaml.safe_load(f)
 
         grid_config = full["CHANNEL_GRID_SEARCH"]
@@ -144,12 +144,12 @@ class ChannelModelGridSearch(GridSearchBase):
 
         # receptive field (TCN uses model attribute; GMP uses max memory + 1)
         model_type = point["model"]
-        if model_type == "tcn":
-            metrics["receptive_field"] = int(adapter.model.receptive_field)
-        elif model_type == "gmp":
+        if model_type == "gmp":
             mem_lin = point["params"].get("memory_linear", 0)
             mem_nonlin = point["params"].get("memory_nonlinear", 0)
             metrics["receptive_field"] = max(mem_lin, mem_nonlin) + 1
+        elif hasattr(adapter, "model") and hasattr(adapter.model, "receptive_field"):
+            metrics["receptive_field"] = int(adapter.model.receptive_field)
 
         # distribution (for GMP always "none"; for TCN track the learned noise type)
         dist = point["params"].get("distribution", "none")

@@ -23,16 +23,23 @@ _DIST_TO_FLAGS = {
 }
 
 
-def gaussian_nll(residual, std):
-    return torch.mean(0.5 * torch.log(2 * torch.pi * std ** 2) + 0.5 * (residual / std) ** 2)
+def _beta_nll_reduce(per_element_nll, std, beta):
+    if not beta:
+        return torch.mean(per_element_nll)
+    return torch.mean((std.detach() ** (2.0 * beta)) * per_element_nll)
 
 
-def students_t_loss(residual, std, nu):
+def gaussian_nll(residual, std, beta=0.0):
+    per_element_nll = 0.5 * torch.log(2 * torch.pi * std ** 2) + 0.5 * (residual / std) ** 2
+    return _beta_nll_reduce(per_element_nll, std, beta)
+
+
+def students_t_loss(residual, std, nu, beta=0.0):
     z = residual / std
     term1 = (-torch.lgamma((nu + 1) / 2) + 0.5 * torch.log(torch.pi * nu)
              + torch.lgamma(nu / 2) + torch.log(std + 1e-8))
     term2 = ((nu + 1) / 2) * torch.log(1 + torch.square(z) / nu + 1e-8)
-    return torch.mean(term1 + term2)
+    return _beta_nll_reduce(term1 + term2, std, beta)
 
 
 @runtime_checkable
@@ -68,7 +75,7 @@ class ChannelModel(Protocol):
 class TCNAdapter:
     name = "tcn"
     ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "distribution", "learn_noise", "gaussian")
-    TRAIN_KEYS = ("epochs", "lr", "batch_size", "factor", "patience", "min_lr")
+    TRAIN_KEYS = ("epochs", "lr", "batch_size", "factor", "patience", "min_lr", "beta_nll")
 
     def __init__(self, model: TCN_channel, train_params: dict, device: str, shared: dict = None):
         self.model = model
@@ -76,6 +83,7 @@ class TCNAdapter:
         self.device = device
         self.shared = shared or {}
         self.exclude_warmup = bool(self.shared.get("EXCLUDE_WARMUP", False))
+        self.beta_nll = float(self.train_params.get("beta_nll", self.shared.get("BETA_NLL", 0.0)))
 
     @classmethod
     def from_config(cls, params: dict, device: str, shared: dict = None) -> "TCNAdapter":
@@ -110,8 +118,8 @@ class TCNAdapter:
             residual = (yb - y_pred)[..., s:]
             std = y_pred_std[..., s:]
             if self.model.gaussian:
-                return gaussian_nll(residual, std)
-            return students_t_loss(residual, std, y_pred_nu[..., s:])
+                return gaussian_nll(residual, std, beta=self.beta_nll)
+            return students_t_loss(residual, std, y_pred_nu[..., s:], beta=self.beta_nll)
         return F.mse_loss(self.model(xb)[..., s:], yb[..., s:])
 
     def _val_loss(self, X_val, Y_val) -> float:
