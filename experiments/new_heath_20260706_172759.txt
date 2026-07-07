@@ -1,0 +1,1261 @@
+===== CONFIG: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/experiments/train_and_validate.yml =====
+RUNTIME:
+  DEVICE: cuda
+  SEED: 0
+
+# Set either path to reuse a previously trained experiment and skip that grid
+# search step entirely. Leave unset (or null) to run a fresh grid search.
+# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/channel_models_YYYYMMDD_HHMM
+# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/encoder_decoder_YYYYMMDD_HHMM
+
+
+# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/mint_surf_channel_models_20260704_2358
+# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/azure_vault_encoder_decoder_20260629_0738
+HARDWARE_RESOURCES:
+    Agilent_33250A:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: Agilent Technologies,33250A,0,1.03-1.01-1.00-03-1
+    Tektronix_TDS2000:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: TEKTRONIX,TBS2074,C020561,CF:91.1CT FV:v1.26.0; FPGA:v1.21;
+    HP_EE3631A:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: HEWLETT-PACKARD,E3631A,0,1.6-5.0-1.0
+DATA_COLLECTION:
+  N: 5000 # Number of datapoints collected at the DC offset
+  DC_OFFSETS: [0.050] # A (single offset per dataset)
+  F_MINS: [300e3] # Hz
+  F_MAXS: [7.6e6] # Hz
+  OSC_SAMPLE_RATES: [500e6] # Hz
+  SUBCARRIER_SPACING: 100e3 # Hz
+  UPSAMPLE_FACTOR: 4
+  AWG_TABLE_FRACTION: 0.5
+  CP_LENGTH_FRACTION: 0.125
+  PREAMBLE_LENGTH: 256
+  MODULATION_FORMAT: "m7_apsk_constellation"
+  OSC_SCALE: 0.5 # V/div
+  POWER_MIN: 0.5  # minimum symbol power
+  POWER_MAX: 3.0  # maximum symbol power; at 3 the +/-3 clip becomes apparent
+  JITTER_POWER: 0.2 # off-constellation complex noise on symbols (collection only); 0 disables
+  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/dc0.05A_fmin300000_fmax7.6e+06_20260703_1631.zarr
+  CLIP_THRESHOLD: 3.0 # clip the AWG output to +/-this value (V)
+
+CHANNEL_GRID_SEARCH:
+  RECEPTIVE_FIELD: 20
+  VAL_FRACTION: 0.2
+  EXCLUDE_WARMUP: false       # drop the first receptive_field samples (causal warm-up,
+                             # zero-padded context) from the channel-model loss AND rRMSE.
+                            
+  # SELECTED_RUN_IDS:        # optional: pin exactly which channel runs advance to the
+  #   - tcn_1a2b3c4d         # encoder/decoder stage.
+  #   - gmp_5e6f7a8b        
+  models:
+    - model: gmp
+      params:
+        memory_linear: 105
+        memory_nonlinear: 105
+        nonlinearity_order: [3, 4]
+        cross_term_depth: [8, 16]
+        ridge: 1.0e-3
+
+    - model: tcn
+      params:
+        nlayers: [2, 3, 4]
+        hidden_channels: [8, 16]
+        kernel_size: [8]
+        dilation_base: 2
+        epochs: 150
+        lr: 1.0e-3
+        batch_size: 16
+        factor: 0.5 # Learning rate scheduler
+        patience: 10
+        min_lr: 1.0e-6
+        distribution: ["none"]
+
+    - model: tcn
+      params:
+        nlayers: [2, 3, 4]
+        hidden_channels: [8, 16]
+        kernel_size: [4, 8]
+        dilation_base: 2
+        epochs: 150
+        lr: 1.0e-3
+        batch_size: 16
+        factor: 0.5 # Learning rate scheduler
+        patience: 10
+        min_lr: 1.0e-6
+        distribution: ["gaussian", "students_t"]
+        beta_nll: [0.5, 1]
+
+    - model: lru   # Linear Recurrent Unit
+      params:
+        state_dim: [2, 4, 8]      # linear state-space size (memory capacity)
+        hidden_dim: [8, 16, 32]     # per-timestep feature width
+        n_layers: 2
+        dropout: 0.1
+        r_min: 0.0               # eigenvalue-radius init range; r_max -> 1 allows long memory
+        r_max: 1.0
+        max_phase: 6.28          # init phase spread (2*pi) of the state eigenvalues
+        epochs: 150
+        lr: 1.0e-3
+        batch_size: 16
+        factor: 0.5 # Learning rate scheduler
+        patience: 10
+        min_lr: 1.0e-6
+        distribution: ["none"]
+
+    - model: lru
+      params:
+        state_dim: [2, 4, 8]
+        hidden_dim: [8, 16, 32]
+        n_layers: 2
+        dropout: 0.1
+        r_min: 0.0
+        r_max: 1.0
+        max_phase: 6.28
+        epochs: 150
+        lr: 1.0e-3
+        batch_size: 16
+        factor: 0.5
+        patience: 10
+        min_lr: 1.0e-6
+        distribution: ["gaussian", "students_t"]
+        beta_nll: [0.5, 1]
+
+ENCODER_DECODER:
+  CONSTELLATION: qpsk
+  PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to +-this
+  params:
+    nlayers: [2, 3]
+    dilation_base: [2]
+    kernel_size: [4, 6]
+    hidden_channels: [16]
+    epochs: 1000
+    lr: 1.0e-3
+    weight_decay: 1.0e-5    # AdamW L2 regularization; 0 disables. List -> swept.
+    batch_size: 16
+    factor: 0.5 # Learning rate scheduler
+    patience: 25
+    min_lr: 1.0e-6
+
+ENCODER_DECODER_VALIDATION:
+  CONSTELLATION: qpsk
+===== END CONFIG =====
+
+Logging console output to /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/experiments/new_heath_20260706_172759.txt
+Initializing processes and threads. . .
+Initializing VISA resources. . .
+No cache found! Checking all resources. . .
+Hardware state cached to exp_state_cache_d74eed581d789d23d4d7fb27aaa5ef59.json
+Run name: new_heath
+DC offset set to 0.050 A
+AWG frequency 64680.85 Hz
+[check_channel 17:30:06] [start] 1 MHz Vrms = 0.1377 V  (128-avg, mode=AVERAGE)
+reusing existing dataset at /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/dc0.05A_fmin300000_fmax7.6e+06_20260703_1631.zarr
+[check_channel 17:30:09] [post-collection] 1 MHz Vrms = 0.1377 V  (128-avg, mode=AVERAGE)
+[grid] experiment dir: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/new_heath_channel_models_20260706_1730  (103 points)
+[grid] (1/103) done gmp_0a5b862a
+[grid] (2/103) done gmp_20541f6c
+[grid] (3/103) done gmp_e5e4e2e1
+[grid] (4/103) done gmp_cd1ab35f
+[grid] (5/103) done tcn_54f60925
+[grid] (6/103) done tcn_45b951c6
+[grid] (7/103) done tcn_6072b679
+[grid] (8/103) done tcn_0982e232
+[grid] (9/103) done tcn_3f59760c
+[grid] (10/103) done tcn_1586a82f
+[grid] (11/103) done tcn_4c5b322e
+[grid] (12/103) done tcn_9bef1444
+[grid] (13/103) done tcn_92e50e6c
+[grid] (14/103) done tcn_6150b97b
+[grid] (15/103) done tcn_b6c04c73
+[grid] (16/103) done tcn_e5f3c0a5
+[grid] (17/103) done tcn_38c92fb8
+[grid] (18/103) done tcn_abf31338
+[grid] (19/103) done tcn_515001a5
+[grid] (20/103) done tcn_d59571a9
+[grid] (21/103) done tcn_42dc8b2f
+[grid] (22/103) done tcn_2db65718
+[grid] (23/103) done tcn_14621dbd
+[grid] (24/103) done tcn_599dac36
+[grid] (25/103) done tcn_9ea1bff4
+[grid] (26/103) done tcn_bf66bbef
+[grid] (27/103) done tcn_c1d328a4
+[grid] (28/103) done tcn_57669a05
+[grid] (29/103) done tcn_c845f581
+[grid] (30/103) done tcn_7c7062a1
+[grid] (31/103) done tcn_0d402d2a
+[grid] (32/103) done tcn_393aab04
+[grid] (33/103) done tcn_53c8160e
+[grid] (34/103) done tcn_5468df85
+[grid] (35/103) done tcn_2d67f62c
+[grid] (36/103) done tcn_fbec1d33
+[grid] (37/103) done tcn_e48077a6
+[grid] (38/103) done tcn_12b2e678
+[grid] (39/103) done tcn_22d308fc
+[grid] (40/103) done tcn_a58adca9
+[grid] (41/103) done tcn_ff1273dd
+[grid] (42/103) done tcn_a6cc78fe
+[grid] (43/103) done tcn_91f49fca
+[grid] (44/103) done tcn_9775910b
+[grid] (45/103) done tcn_cb40a5fa
+[grid] (46/103) done tcn_efe217e6
+[grid] (47/103) done tcn_5038a54d
+[grid] (48/103) done tcn_079ae1e7
+[grid] (49/103) done tcn_f67576b3
+[grid] (50/103) done tcn_1c70e2fd
+[grid] (51/103) done tcn_32c6b737
+[grid] (52/103) done tcn_9b17024f
+[grid] (53/103) done tcn_1d63c0f1
+[grid] (54/103) done tcn_4e16ba91
+[grid] (55/103) done tcn_531c463c
+[grid] (56/103) done tcn_66c8759c
+[grid] (57/103) done tcn_539e9ea1
+[grid] (58/103) done tcn_f6d61b75
+[grid] (59/103) done lru_9b4f2d17
+[grid] (60/103) done lru_f3dfa31e
+[grid] (61/103) done lru_70b970b7
+[grid] (62/103) done lru_dcb55b2b
+[grid] (63/103) done lru_8ab635cf
+[grid] (64/103) done lru_45e5a525
+[grid] (65/103) done lru_f42ff946
+[grid] (66/103) done lru_10807e34
+[grid] (67/103) done lru_8c8b9d1f
+[grid] (68/103) done lru_e4924ba7
+[grid] (69/103) done lru_e65bc1a7
+[grid] (70/103) done lru_af3a061f
+[grid] (71/103) done lru_95d66a50
+[grid] (72/103) done lru_8a66811e
+[grid] (73/103) done lru_b33b9252
+[grid] (74/103) done lru_ac12052f
+[grid] (75/103) done lru_c85fe129
+[grid] (76/103) done lru_a21a22d3
+[grid] (77/103) done lru_8199c66c
+[grid] (78/103) done lru_9110ec69
+[grid] (79/103) done lru_62da8524
+[grid] (80/103) done lru_15e036ab
+[grid] (81/103) done lru_2e9573f9
+[grid] (82/103) done lru_18d7e26a
+[grid] (83/103) done lru_24d00fb7
+[grid] (84/103) done lru_3c7b2bee
+[grid] (85/103) done lru_f94595d4
+[grid] (86/103) done lru_7f843c16
+[grid] (87/103) done lru_a471b4dc
+[grid] (88/103) done lru_4f3124c1
+[grid] (89/103) done lru_06715933
+[grid] (90/103) done lru_89968419
+[grid] (91/103) done lru_87a49be3
+[grid] (92/103) done lru_6daa8608
+[grid] (93/103) done lru_51c1677a
+[grid] (94/103) done lru_3e327f37
+[grid] (95/103) done lru_e238ce3f
+[grid] (96/103) done lru_fe659ee7
+[grid] (97/103) done lru_16a2e715
+[grid] (98/103) done lru_8f9c3b51
+[grid] (99/103) done lru_d6ba05ca
+[grid] (100/103) done lru_8dc986ca
+[grid] (101/103) done lru_a3e7bae8
+[grid] (102/103) done lru_a41b1118
+[grid] (103/103) done lru_7092af25
+  channel gmp   dist=none          run=gmp_0a5b862a
+  channel gmp   dist=none          run=gmp_20541f6c
+  channel gmp   dist=none          run=gmp_e5e4e2e1
+  channel gmp   dist=none          run=gmp_cd1ab35f
+  channel tcn   dist=none          run=tcn_54f60925
+  channel tcn   dist=none          run=tcn_45b951c6
+  channel tcn   dist=none          run=tcn_6072b679
+  channel tcn   dist=none          run=tcn_0982e232
+  channel tcn   dist=none          run=tcn_3f59760c
+  channel tcn   dist=none          run=tcn_1586a82f
+  channel tcn   dist=gaussian      run=tcn_4c5b322e
+  channel tcn   dist=gaussian      run=tcn_9bef1444
+  channel tcn   dist=students_t    run=tcn_92e50e6c
+  channel tcn   dist=students_t    run=tcn_6150b97b
+  channel tcn   dist=gaussian      run=tcn_b6c04c73
+  channel tcn   dist=gaussian      run=tcn_e5f3c0a5
+  channel tcn   dist=students_t    run=tcn_38c92fb8
+  channel tcn   dist=students_t    run=tcn_abf31338
+  channel tcn   dist=gaussian      run=tcn_515001a5
+  channel tcn   dist=gaussian      run=tcn_d59571a9
+  channel tcn   dist=students_t    run=tcn_42dc8b2f
+  channel tcn   dist=students_t    run=tcn_2db65718
+  channel tcn   dist=gaussian      run=tcn_14621dbd
+  channel tcn   dist=gaussian      run=tcn_599dac36
+  channel tcn   dist=students_t    run=tcn_9ea1bff4
+  channel tcn   dist=students_t    run=tcn_bf66bbef
+  channel tcn   dist=gaussian      run=tcn_c1d328a4
+  channel tcn   dist=gaussian      run=tcn_57669a05
+  channel tcn   dist=students_t    run=tcn_c845f581
+  channel tcn   dist=students_t    run=tcn_7c7062a1
+  channel tcn   dist=gaussian      run=tcn_0d402d2a
+  channel tcn   dist=gaussian      run=tcn_393aab04
+  channel tcn   dist=students_t    run=tcn_53c8160e
+  channel tcn   dist=students_t    run=tcn_5468df85
+  channel tcn   dist=gaussian      run=tcn_2d67f62c
+  channel tcn   dist=gaussian      run=tcn_fbec1d33
+  channel tcn   dist=students_t    run=tcn_e48077a6
+  channel tcn   dist=students_t    run=tcn_12b2e678
+  channel tcn   dist=gaussian      run=tcn_22d308fc
+  channel tcn   dist=gaussian      run=tcn_a58adca9
+  channel tcn   dist=students_t    run=tcn_ff1273dd
+  channel tcn   dist=students_t    run=tcn_a6cc78fe
+  channel tcn   dist=gaussian      run=tcn_91f49fca
+  channel tcn   dist=gaussian      run=tcn_9775910b
+  channel tcn   dist=students_t    run=tcn_cb40a5fa
+  channel tcn   dist=students_t    run=tcn_efe217e6
+  channel tcn   dist=gaussian      run=tcn_5038a54d
+  channel tcn   dist=gaussian      run=tcn_079ae1e7
+  channel tcn   dist=students_t    run=tcn_f67576b3
+  channel tcn   dist=students_t    run=tcn_1c70e2fd
+  channel tcn   dist=gaussian      run=tcn_32c6b737
+  channel tcn   dist=gaussian      run=tcn_9b17024f
+  channel tcn   dist=students_t    run=tcn_1d63c0f1
+  channel tcn   dist=students_t    run=tcn_4e16ba91
+  channel tcn   dist=gaussian      run=tcn_531c463c
+  channel tcn   dist=gaussian      run=tcn_66c8759c
+  channel tcn   dist=students_t    run=tcn_539e9ea1
+  channel tcn   dist=students_t    run=tcn_f6d61b75
+  channel lru   dist=none          run=lru_9b4f2d17
+  channel lru   dist=none          run=lru_f3dfa31e
+  channel lru   dist=none          run=lru_70b970b7
+  channel lru   dist=none          run=lru_dcb55b2b
+  channel lru   dist=none          run=lru_8ab635cf
+  channel lru   dist=none          run=lru_45e5a525
+  channel lru   dist=none          run=lru_f42ff946
+  channel lru   dist=none          run=lru_10807e34
+  channel lru   dist=none          run=lru_8c8b9d1f
+  channel lru   dist=gaussian      run=lru_e4924ba7
+  channel lru   dist=gaussian      run=lru_e65bc1a7
+  channel lru   dist=students_t    run=lru_af3a061f
+  channel lru   dist=students_t    run=lru_95d66a50
+  channel lru   dist=gaussian      run=lru_8a66811e
+  channel lru   dist=gaussian      run=lru_b33b9252
+  channel lru   dist=students_t    run=lru_ac12052f
+  channel lru   dist=students_t    run=lru_c85fe129
+  channel lru   dist=gaussian      run=lru_a21a22d3
+  channel lru   dist=gaussian      run=lru_8199c66c
+  channel lru   dist=students_t    run=lru_9110ec69
+  channel lru   dist=students_t    run=lru_62da8524
+  channel lru   dist=gaussian      run=lru_15e036ab
+  channel lru   dist=gaussian      run=lru_2e9573f9
+  channel lru   dist=students_t    run=lru_18d7e26a
+  channel lru   dist=students_t    run=lru_24d00fb7
+  channel lru   dist=gaussian      run=lru_3c7b2bee
+  channel lru   dist=gaussian      run=lru_f94595d4
+  channel lru   dist=students_t    run=lru_7f843c16
+  channel lru   dist=students_t    run=lru_a471b4dc
+  channel lru   dist=gaussian      run=lru_4f3124c1
+  channel lru   dist=gaussian      run=lru_06715933
+  channel lru   dist=students_t    run=lru_89968419
+  channel lru   dist=students_t    run=lru_87a49be3
+  channel lru   dist=gaussian      run=lru_6daa8608
+  channel lru   dist=gaussian      run=lru_51c1677a
+  channel lru   dist=students_t    run=lru_3e327f37
+  channel lru   dist=students_t    run=lru_e238ce3f
+  channel lru   dist=gaussian      run=lru_fe659ee7
+  channel lru   dist=gaussian      run=lru_16a2e715
+  channel lru   dist=students_t    run=lru_8f9c3b51
+  channel lru   dist=students_t    run=lru_d6ba05ca
+  channel lru   dist=gaussian      run=lru_8dc986ca
+  channel lru   dist=gaussian      run=lru_a3e7bae8
+  channel lru   dist=students_t    run=lru_a41b1118
+  channel lru   dist=students_t    run=lru_7092af25
+[grid] experiment dir: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/new_heath_encoder_decoder_20260707_0250  (412 points)
+[grid] (1/412) done tcn_ae_cf817e4d
+[grid] (2/412) done tcn_ae_b2308e48
+[grid] (3/412) done tcn_ae_0e1e6749
+[grid] (4/412) done tcn_ae_35aa47b4
+[grid] (5/412) done tcn_ae_77af3119
+[grid] (6/412) done tcn_ae_d08328a4
+[grid] (7/412) done tcn_ae_61c541e9
+[grid] (8/412) done tcn_ae_782e1cc2
+[grid] (9/412) done tcn_ae_119e5441
+[grid] (10/412) done tcn_ae_7a4cdfcd
+[grid] (11/412) done tcn_ae_56c9025f
+[grid] (12/412) done tcn_ae_c6115a06
+[grid] (13/412) done tcn_ae_4c6fd3a5
+[grid] (14/412) done tcn_ae_c530a734
+[grid] (15/412) done tcn_ae_3123131e
+[grid] (16/412) done tcn_ae_6b60d83e
+[grid] (17/412) done tcn_ae_63573628
+[grid] (18/412) done tcn_ae_bee946f4
+[grid] (19/412) done tcn_ae_98e959dc
+[grid] (20/412) done tcn_ae_5300f614
+[grid] (21/412) done tcn_ae_23ac2aee
+[grid] (22/412) done tcn_ae_b60671c9
+[grid] (23/412) done tcn_ae_7f4c4b22
+[grid] (24/412) done tcn_ae_42cec8d9
+[grid] (25/412) done tcn_ae_9c4a18f9
+[grid] (26/412) done tcn_ae_28bf2054
+[grid] (27/412) done tcn_ae_e98aff0e
+[grid] (28/412) done tcn_ae_afe354ca
+[grid] (29/412) done tcn_ae_d65b3e78
+[grid] (30/412) done tcn_ae_58279d93
+[grid] (31/412) done tcn_ae_62a14443
+[grid] (32/412) done tcn_ae_4b11523b
+[grid] (33/412) done tcn_ae_d49edc9f
+[grid] (34/412) done tcn_ae_002ab123
+[grid] (35/412) done tcn_ae_2810577d
+[grid] (36/412) done tcn_ae_b291b73e
+[grid] (37/412) done tcn_ae_e3b2e5ba
+[grid] (38/412) done tcn_ae_658117a4
+[grid] (39/412) done tcn_ae_ff17b811
+[grid] (40/412) done tcn_ae_1e94006b
+[grid] (41/412) done tcn_ae_0ea3f089
+[grid] (42/412) done tcn_ae_a4f2ca44
+[grid] (43/412) done tcn_ae_5af3c117
+[grid] (44/412) done tcn_ae_f1eeb2f0
+[grid] (45/412) done tcn_ae_e6cda063
+[grid] (46/412) done tcn_ae_63633cce
+[grid] (47/412) done tcn_ae_e3977a64
+[grid] (48/412) done tcn_ae_9e708b40
+[grid] (49/412) done tcn_ae_de3560ba
+[grid] (50/412) done tcn_ae_fcdcdb52
+[grid] (51/412) done tcn_ae_476e93ea
+[grid] (52/412) done tcn_ae_19667e76
+[grid] (53/412) done tcn_ae_3083c9f6
+[grid] (54/412) done tcn_ae_95266a32
+[grid] (55/412) done tcn_ae_8b96e51f
+[grid] (56/412) done tcn_ae_07d7ce6a
+[grid] (57/412) done tcn_ae_9e2a640f
+[grid] (58/412) done tcn_ae_5fd3d86f
+[grid] (59/412) done tcn_ae_a7208d61
+[grid] (60/412) done tcn_ae_479d655c
+[grid] (61/412) done tcn_ae_eb2bce7b
+[grid] (62/412) done tcn_ae_707e2fd4
+[grid] (63/412) done tcn_ae_73efd2e3
+[grid] (64/412) done tcn_ae_93414b1e
+[grid] (65/412) done tcn_ae_f326eaa7
+[grid] (66/412) done tcn_ae_c0bab674
+[grid] (67/412) done tcn_ae_c08ba84e
+[grid] (68/412) done tcn_ae_d353db5f
+[grid] (69/412) done tcn_ae_3396b259
+[grid] (70/412) done tcn_ae_adbac5b6
+[grid] (71/412) done tcn_ae_412ce655
+[grid] (72/412) done tcn_ae_f213a3cd
+[grid] (73/412) done tcn_ae_22274c96
+[grid] (74/412) done tcn_ae_277f9239
+[grid] (75/412) done tcn_ae_bc02e358
+[grid] (76/412) done tcn_ae_6e1091da
+[grid] (77/412) done tcn_ae_778fe186
+[grid] (78/412) done tcn_ae_c1f3c0b1
+[grid] (79/412) done tcn_ae_930865f5
+[grid] (80/412) done tcn_ae_2f0bfd04
+[grid] (81/412) done tcn_ae_3b28123b
+[grid] (82/412) done tcn_ae_f3af1c27
+[grid] (83/412) done tcn_ae_ffe5cf1a
+[grid] (84/412) done tcn_ae_6901b84c
+[grid] (85/412) done tcn_ae_7ded80b2
+[grid] (86/412) done tcn_ae_2c2761f4
+[grid] (87/412) done tcn_ae_42df7718
+[grid] (88/412) done tcn_ae_527d07df
+[grid] (89/412) done tcn_ae_26c50470
+[grid] (90/412) done tcn_ae_6dc5e23f
+[grid] (91/412) done tcn_ae_2f4b5420
+[grid] (92/412) done tcn_ae_72c76649
+[grid] (93/412) done tcn_ae_9c22a64d
+[grid] (94/412) done tcn_ae_cf95091a
+[grid] (95/412) done tcn_ae_be771d61
+[grid] (96/412) done tcn_ae_28ca17b6
+[grid] (97/412) done tcn_ae_6388c33d
+[grid] (98/412) done tcn_ae_c6174113
+[grid] (99/412) done tcn_ae_3c9d6a7a
+[grid] (100/412) done tcn_ae_b8b65955
+[grid] (101/412) done tcn_ae_5c22ba7a
+[grid] (102/412) done tcn_ae_6e226b1b
+[grid] (103/412) done tcn_ae_e5ac96ff
+[grid] (104/412) done tcn_ae_13914f53
+[grid] (105/412) done tcn_ae_939c9a6c
+[grid] (106/412) done tcn_ae_94f445fe
+[grid] (107/412) done tcn_ae_265bc086
+[grid] (108/412) done tcn_ae_d9ad26b6
+[grid] (109/412) done tcn_ae_6badc451
+[grid] (110/412) done tcn_ae_1c7538ff
+[grid] (111/412) done tcn_ae_69a416a9
+[grid] (112/412) done tcn_ae_c4082abb
+[grid] (113/412) done tcn_ae_b0bdb783
+[grid] (114/412) done tcn_ae_d8cc3cd6
+[grid] (115/412) done tcn_ae_696842c6
+[grid] (116/412) done tcn_ae_987b3378
+[grid] (117/412) done tcn_ae_80bbeae6
+[grid] (118/412) done tcn_ae_3ed7dba2
+[grid] (119/412) done tcn_ae_2e73a16e
+[grid] (120/412) done tcn_ae_23efb44f
+[grid] (121/412) done tcn_ae_e5a776c2
+[grid] (122/412) done tcn_ae_db2096a5
+[grid] (123/412) done tcn_ae_d892c084
+[grid] (124/412) done tcn_ae_ae3d5081
+[grid] (125/412) done tcn_ae_40626486
+[grid] (126/412) done tcn_ae_d7c66739
+[grid] (127/412) done tcn_ae_a43da381
+[grid] (128/412) done tcn_ae_120ea8e4
+[grid] (129/412) done tcn_ae_0e23c638
+[grid] (130/412) done tcn_ae_e52038e2
+[grid] (131/412) done tcn_ae_7aa5986b
+[grid] (132/412) done tcn_ae_9c0b6b9c
+[grid] (133/412) done tcn_ae_d6266903
+[grid] (134/412) done tcn_ae_38747c3c
+[grid] (135/412) done tcn_ae_98ebf7d7
+[grid] (136/412) done tcn_ae_0b620d9a
+[grid] (137/412) done tcn_ae_f658bbf8
+[grid] (138/412) done tcn_ae_9c3ea35d
+[grid] (139/412) done tcn_ae_27146910
+[grid] (140/412) done tcn_ae_faf1d6c4
+[grid] (141/412) done tcn_ae_a378999d
+[grid] (142/412) done tcn_ae_782a2696
+[grid] (143/412) done tcn_ae_34627589
+[grid] (144/412) done tcn_ae_3f9e21aa
+[grid] (145/412) done tcn_ae_d0e1214d
+[grid] (146/412) done tcn_ae_4da19617
+[grid] (147/412) done tcn_ae_a40d4b70
+[grid] (148/412) done tcn_ae_3f5d0dd1
+[grid] (149/412) done tcn_ae_05acf268
+[grid] (150/412) done tcn_ae_4f21d20b
+[grid] (151/412) done tcn_ae_869b3faf
+[grid] (152/412) done tcn_ae_95e21c03
+[grid] (153/412) done tcn_ae_70ee3e74
+[grid] (154/412) done tcn_ae_0c539837
+[grid] (155/412) done tcn_ae_977b42af
+[grid] (156/412) done tcn_ae_229ba629
+[grid] (157/412) done tcn_ae_b5c27688
+[grid] (158/412) done tcn_ae_b04fca58
+[grid] (159/412) done tcn_ae_336a1b3e
+[grid] (160/412) done tcn_ae_c92cd968
+[grid] (161/412) done tcn_ae_104f9ac4
+[grid] (162/412) done tcn_ae_cd24951e
+[grid] (163/412) done tcn_ae_ba449f74
+[grid] (164/412) done tcn_ae_384f7edc
+[grid] (165/412) done tcn_ae_ee85337a
+[grid] (166/412) done tcn_ae_ea69b6ae
+[grid] (167/412) done tcn_ae_1a044807
+[grid] (168/412) done tcn_ae_c10219c2
+[grid] (169/412) done tcn_ae_6c0ad129
+[grid] (170/412) done tcn_ae_bf4ddd7b
+[grid] (171/412) done tcn_ae_2d876aac
+[grid] (172/412) done tcn_ae_51411d03
+[grid] (173/412) done tcn_ae_1ab62ea8
+[grid] (174/412) done tcn_ae_523b8fbc
+[grid] (175/412) done tcn_ae_ef4fe6a5
+[grid] (176/412) done tcn_ae_cb916a97
+[grid] (177/412) done tcn_ae_3c7bcc34
+[grid] (178/412) done tcn_ae_1addf2ef
+[grid] (179/412) done tcn_ae_3f241aa6
+[grid] (180/412) done tcn_ae_0ab7ff70
+[grid] (181/412) done tcn_ae_a46f8805
+[grid] (182/412) done tcn_ae_bb6e531e
+[grid] (183/412) done tcn_ae_03535f41
+[grid] (184/412) done tcn_ae_cf8749b6
+[grid] (185/412) done tcn_ae_cfadc532
+[grid] (186/412) done tcn_ae_69246313
+[grid] (187/412) done tcn_ae_523a3702
+[grid] (188/412) done tcn_ae_36a11682
+[grid] (189/412) done tcn_ae_1020dd6f
+[grid] (190/412) done tcn_ae_88509d9c
+[grid] (191/412) done tcn_ae_57e5f85c
+[grid] (192/412) done tcn_ae_ff554530
+[grid] (193/412) done tcn_ae_a1b63e50
+[grid] (194/412) done tcn_ae_f06616f3
+[grid] (195/412) done tcn_ae_96250062
+[grid] (196/412) done tcn_ae_8b0174cc
+[grid] (197/412) done tcn_ae_89ff161d
+[grid] (198/412) done tcn_ae_d8efaa08
+[grid] (199/412) done tcn_ae_aa85c779
+[grid] (200/412) done tcn_ae_399b150d
+[grid] (201/412) done tcn_ae_69d03b2f
+[grid] (202/412) done tcn_ae_a67e01f6
+[grid] (203/412) done tcn_ae_f2791048
+[grid] (204/412) done tcn_ae_8c39b57c
+[grid] (205/412) done tcn_ae_ea1360cf
+[grid] (206/412) done tcn_ae_004ffc1e
+[grid] (207/412) done tcn_ae_e80169cc
+[grid] (208/412) done tcn_ae_980c40bc
+[grid] (209/412) done tcn_ae_0a853420
+[grid] (210/412) done tcn_ae_99179de6
+[grid] (211/412) done tcn_ae_914a101a
+[grid] (212/412) done tcn_ae_1acbf7cb
+[grid] (213/412) done tcn_ae_047a1e3a
+[grid] (214/412) done tcn_ae_e3d17dc9
+[grid] (215/412) done tcn_ae_97c99fb8
+[grid] (216/412) done tcn_ae_784ab32d
+[grid] (217/412) done tcn_ae_376f57e3
+[grid] (218/412) done tcn_ae_bd5cc8d0
+[grid] (219/412) done tcn_ae_3a9af9ce
+[grid] (220/412) done tcn_ae_31c7b460
+[grid] (221/412) done tcn_ae_d7646d15
+[grid] (222/412) done tcn_ae_355e8f7c
+[grid] (223/412) done tcn_ae_51b0f1fa
+[grid] (224/412) done tcn_ae_5a82cfda
+[grid] (225/412) done tcn_ae_5696193a
+[grid] (226/412) done tcn_ae_373ae92a
+[grid] (227/412) done tcn_ae_e6925ff6
+[grid] (228/412) done tcn_ae_20a55097
+[grid] (229/412) done tcn_ae_5ea48759
+[grid] (230/412) done tcn_ae_62c7129c
+[grid] (231/412) done tcn_ae_7a005271
+[grid] (232/412) done tcn_ae_50a4309b
+[grid] (233/412) done tcn_ae_2227874b
+[grid] (234/412) done tcn_ae_f76e293a
+[grid] (235/412) done tcn_ae_95a8823f
+[grid] (236/412) done tcn_ae_b040e879
+[grid] (237/412) done tcn_ae_c353b608
+[grid] (238/412) done tcn_ae_4ddf7f77
+[grid] (239/412) done tcn_ae_431222e2
+[grid] (240/412) done tcn_ae_1cbe3890
+[grid] (241/412) done tcn_ae_8a83c0b8
+[grid] (242/412) done tcn_ae_c37030ab
+[grid] (243/412) done tcn_ae_0c3c0d7a
+[grid] (244/412) done tcn_ae_c2700a83
+[grid] (245/412) done tcn_ae_3f7c708e
+[grid] (246/412) done tcn_ae_76ef982f
+[grid] (247/412) done tcn_ae_0a42ed8e
+[grid] (248/412) done tcn_ae_2ccfac7b
+[grid] (249/412) done tcn_ae_4b21b08e
+[grid] (250/412) done tcn_ae_b633a709
+[grid] (251/412) done tcn_ae_705328a9
+[grid] (252/412) done tcn_ae_63dccce9
+[grid] (253/412) done tcn_ae_2c170236
+[grid] (254/412) done tcn_ae_a2110a97
+[grid] (255/412) done tcn_ae_fe51caf5
+[grid] (256/412) done tcn_ae_d6cbb488
+[grid] (257/412) done tcn_ae_ec3e527c
+[grid] (258/412) done tcn_ae_41bf9846
+[grid] (259/412) done tcn_ae_f1a8bc00
+[grid] (260/412) done tcn_ae_12a544d5
+[grid] (261/412) done tcn_ae_6e064cbf
+[grid] (262/412) done tcn_ae_f5bc32df
+[grid] (263/412) done tcn_ae_762fccbf
+[grid] (264/412) done tcn_ae_16bc3719
+[grid] (265/412) done tcn_ae_a8409afd
+[grid] (266/412) done tcn_ae_d34dbc21
+[grid] (267/412) done tcn_ae_71996442
+[grid] (268/412) done tcn_ae_712b32cc
+[grid] (269/412) done tcn_ae_e7a1deca
+[grid] (270/412) done tcn_ae_e012978e
+[grid] (271/412) done tcn_ae_277103aa
+[grid] (272/412) done tcn_ae_19995987
+[grid] (273/412) done tcn_ae_a6d42312
+[grid] (274/412) done tcn_ae_628c7536
+[grid] (275/412) done tcn_ae_2c302ca9
+[grid] (276/412) done tcn_ae_be71a068
+[grid] (277/412) done tcn_ae_e85a929f
+[grid] (278/412) done tcn_ae_c7ff0373
+[grid] (279/412) done tcn_ae_c8eb4913
+[grid] (280/412) done tcn_ae_97f61799
+[grid] (281/412) done tcn_ae_599091cb
+[grid] (282/412) done tcn_ae_325369fd
+[grid] (283/412) done tcn_ae_1729ec6c
+[grid] (284/412) done tcn_ae_d5468cce
+[grid] (285/412) done tcn_ae_a29a8e8d
+[grid] (286/412) done tcn_ae_dfdd2919
+[grid] (287/412) done tcn_ae_a3166060
+[grid] (288/412) done tcn_ae_9bbe214d
+[grid] (289/412) done tcn_ae_c7e52c26
+[grid] (290/412) done tcn_ae_bfdc25f4
+[grid] (291/412) done tcn_ae_8c2b913d
+[grid] (292/412) done tcn_ae_d5fdd68d
+[grid] (293/412) done tcn_ae_b4e77d3e
+[grid] (294/412) done tcn_ae_68511998
+[grid] (295/412) done tcn_ae_819a43de
+[grid] (296/412) done tcn_ae_6cd1a440
+[grid] (297/412) done tcn_ae_6389e734
+[grid] (298/412) done tcn_ae_7b78e351
+[grid] (299/412) done tcn_ae_a28aeae2
+[grid] (300/412) done tcn_ae_4baee22e
+[grid] (301/412) done tcn_ae_cccd3795
+[grid] (302/412) done tcn_ae_93aa4fee
+[grid] (303/412) done tcn_ae_3898d738
+[grid] (304/412) done tcn_ae_d0b94f75
+[grid] (305/412) done tcn_ae_04925117
+[grid] (306/412) done tcn_ae_40ab7869
+[grid] (307/412) done tcn_ae_beda0ede
+[grid] (308/412) done tcn_ae_a01d3798
+[grid] (309/412) done tcn_ae_2eaa11e8
+[grid] (310/412) done tcn_ae_962f6dd7
+[grid] (311/412) done tcn_ae_276e4a8e
+[grid] (312/412) done tcn_ae_8e3248ba
+[grid] (313/412) done tcn_ae_faa4c75d
+[grid] (314/412) done tcn_ae_7c1e0844
+[grid] (315/412) done tcn_ae_036ec24f
+[grid] (316/412) done tcn_ae_ed12e45d
+[grid] (317/412) done tcn_ae_24c71ad4
+[grid] (318/412) done tcn_ae_5b21e32b
+[grid] (319/412) done tcn_ae_8b48d225
+[grid] (320/412) done tcn_ae_aaa62f19
+[grid] (321/412) done tcn_ae_ce26a76a
+[grid] (322/412) done tcn_ae_c68b6c95
+[grid] (323/412) done tcn_ae_f14dbeda
+[grid] (324/412) done tcn_ae_ad64973e
+[grid] (325/412) done tcn_ae_f52c3652
+[grid] (326/412) done tcn_ae_aab53db3
+[grid] (327/412) done tcn_ae_b630d76c
+[grid] (328/412) done tcn_ae_a93ec051
+[grid] (329/412) done tcn_ae_64da1686
+[grid] (330/412) done tcn_ae_ae5e40e0
+[grid] (331/412) done tcn_ae_33316928
+[grid] (332/412) done tcn_ae_2d683f43
+[grid] (333/412) done tcn_ae_f7483daf
+[grid] (334/412) done tcn_ae_2e13cc2c
+[grid] (335/412) done tcn_ae_b98c5913
+[grid] (336/412) done tcn_ae_4dbb8b13
+[grid] (337/412) done tcn_ae_e3f988dd
+[grid] (338/412) done tcn_ae_9f7b0dc9
+[grid] (339/412) done tcn_ae_6cb1ed71
+[grid] (340/412) done tcn_ae_319806b3
+[grid] (341/412) done tcn_ae_17528fa8
+[grid] (342/412) done tcn_ae_000ebef5
+[grid] (343/412) done tcn_ae_93940b06
+[grid] (344/412) done tcn_ae_22ef92b8
+[grid] (345/412) done tcn_ae_19b37fe5
+[grid] (346/412) done tcn_ae_9fc01a3e
+[grid] (347/412) done tcn_ae_cf5d67af
+[grid] (348/412) done tcn_ae_4b99a075
+[grid] (349/412) done tcn_ae_0de781a7
+[grid] (350/412) done tcn_ae_3b3dc474
+[grid] (351/412) done tcn_ae_66784414
+[grid] (352/412) done tcn_ae_c5ab43d6
+[grid] (353/412) done tcn_ae_dfe450cc
+[grid] (354/412) done tcn_ae_7fd6f464
+[grid] (355/412) done tcn_ae_77804da5
+[grid] (356/412) done tcn_ae_b9666092
+[grid] (357/412) done tcn_ae_b89e6fbc
+[grid] (358/412) done tcn_ae_7db226b1
+[grid] (359/412) done tcn_ae_2c0299ed
+[grid] (360/412) done tcn_ae_f74866ca
+[grid] (361/412) done tcn_ae_3d283a80
+[grid] (362/412) done tcn_ae_39022a45
+[grid] (363/412) done tcn_ae_1e4e76ef
+[grid] (364/412) done tcn_ae_19f369b5
+[grid] (365/412) done tcn_ae_c13ab52b
+[grid] (366/412) done tcn_ae_e0015e56
+[grid] (367/412) done tcn_ae_889e7098
+[grid] (368/412) done tcn_ae_6cf3bf1f
+[grid] (369/412) done tcn_ae_e55df362
+[grid] (370/412) done tcn_ae_80060c54
+[grid] (371/412) done tcn_ae_25e25651
+[grid] (372/412) done tcn_ae_87f5debd
+[grid] (373/412) done tcn_ae_f7142ae4
+[grid] (374/412) done tcn_ae_0a43308e
+[grid] (375/412) done tcn_ae_403f3f02
+[grid] (376/412) done tcn_ae_31dbd5a8
+[grid] (377/412) done tcn_ae_5e7cca00
+[grid] (378/412) done tcn_ae_0e10fe88
+[grid] (379/412) done tcn_ae_542119b8
+[grid] (380/412) done tcn_ae_a72c3ac7
+[grid] (381/412) done tcn_ae_54d835a1
+[grid] (382/412) done tcn_ae_ecba03a8
+[grid] (383/412) done tcn_ae_3c592df0
+[grid] (384/412) done tcn_ae_09364e55
+[grid] (385/412) done tcn_ae_668f4980
+[grid] (386/412) done tcn_ae_441d0325
+[grid] (387/412) done tcn_ae_4218d2d4
+[grid] (388/412) done tcn_ae_f88070e1
+[grid] (389/412) done tcn_ae_ab999ba6
+[grid] (390/412) done tcn_ae_48fba0d9
+[grid] (391/412) done tcn_ae_1f88ed6d
+[grid] (392/412) done tcn_ae_2d7ede69
+[grid] (393/412) done tcn_ae_069d0b9b
+[grid] (394/412) done tcn_ae_d2f92c98
+[grid] (395/412) done tcn_ae_1ca31cc1
+[grid] (396/412) done tcn_ae_268665b7
+[grid] (397/412) done tcn_ae_bbd28fa6
+[grid] (398/412) done tcn_ae_d3fae415
+[grid] (399/412) done tcn_ae_c107deef
+[grid] (400/412) done tcn_ae_4a314d42
+[grid] (401/412) done tcn_ae_b449d230
+[grid] (402/412) done tcn_ae_fea2e2fb
+[grid] (403/412) done tcn_ae_c33e5ddd
+[grid] (404/412) done tcn_ae_ba34161d
+[grid] (405/412) done tcn_ae_a40e3953
+[grid] (406/412) done tcn_ae_958652e3
+[grid] (407/412) done tcn_ae_d37633a0
+[grid] (408/412) done tcn_ae_c084e57a
+[grid] (409/412) done tcn_ae_56739730
+[grid] (410/412) done tcn_ae_effc3f35
+[grid] (411/412) done tcn_ae_17697000
+[grid] (412/412) done tcn_ae_53db78cb
+  E/D tcn_ae_cf817e4d  channel_form=gmp
+  E/D tcn_ae_b2308e48  channel_form=gmp
+  E/D tcn_ae_0e1e6749  channel_form=gmp
+  E/D tcn_ae_35aa47b4  channel_form=gmp
+  E/D tcn_ae_77af3119  channel_form=nonprob TCN
+  E/D tcn_ae_d08328a4  channel_form=nonprob TCN
+  E/D tcn_ae_61c541e9  channel_form=nonprob TCN
+  E/D tcn_ae_782e1cc2  channel_form=nonprob TCN
+  E/D tcn_ae_119e5441  channel_form=nonprob TCN
+  E/D tcn_ae_7a4cdfcd  channel_form=nonprob TCN
+  E/D tcn_ae_56c9025f  channel_form=prob TCN
+  E/D tcn_ae_c6115a06  channel_form=prob TCN
+  E/D tcn_ae_4c6fd3a5  channel_form=prob TCN
+  E/D tcn_ae_c530a734  channel_form=prob TCN
+  E/D tcn_ae_3123131e  channel_form=prob TCN
+  E/D tcn_ae_6b60d83e  channel_form=prob TCN
+  E/D tcn_ae_63573628  channel_form=prob TCN
+  E/D tcn_ae_bee946f4  channel_form=prob TCN
+  E/D tcn_ae_98e959dc  channel_form=prob TCN
+  E/D tcn_ae_5300f614  channel_form=prob TCN
+  E/D tcn_ae_23ac2aee  channel_form=prob TCN
+  E/D tcn_ae_b60671c9  channel_form=prob TCN
+  E/D tcn_ae_7f4c4b22  channel_form=prob TCN
+  E/D tcn_ae_42cec8d9  channel_form=prob TCN
+  E/D tcn_ae_9c4a18f9  channel_form=prob TCN
+  E/D tcn_ae_28bf2054  channel_form=prob TCN
+  E/D tcn_ae_e98aff0e  channel_form=prob TCN
+  E/D tcn_ae_afe354ca  channel_form=prob TCN
+  E/D tcn_ae_d65b3e78  channel_form=prob TCN
+  E/D tcn_ae_58279d93  channel_form=prob TCN
+  E/D tcn_ae_62a14443  channel_form=prob TCN
+  E/D tcn_ae_4b11523b  channel_form=prob TCN
+  E/D tcn_ae_d49edc9f  channel_form=prob TCN
+  E/D tcn_ae_002ab123  channel_form=prob TCN
+  E/D tcn_ae_2810577d  channel_form=prob TCN
+  E/D tcn_ae_b291b73e  channel_form=prob TCN
+  E/D tcn_ae_e3b2e5ba  channel_form=prob TCN
+  E/D tcn_ae_658117a4  channel_form=prob TCN
+  E/D tcn_ae_ff17b811  channel_form=prob TCN
+  E/D tcn_ae_1e94006b  channel_form=prob TCN
+  E/D tcn_ae_0ea3f089  channel_form=prob TCN
+  E/D tcn_ae_a4f2ca44  channel_form=prob TCN
+  E/D tcn_ae_5af3c117  channel_form=prob TCN
+  E/D tcn_ae_f1eeb2f0  channel_form=prob TCN
+  E/D tcn_ae_e6cda063  channel_form=prob TCN
+  E/D tcn_ae_63633cce  channel_form=prob TCN
+  E/D tcn_ae_e3977a64  channel_form=prob TCN
+  E/D tcn_ae_9e708b40  channel_form=prob TCN
+  E/D tcn_ae_de3560ba  channel_form=prob TCN
+  E/D tcn_ae_fcdcdb52  channel_form=prob TCN
+  E/D tcn_ae_476e93ea  channel_form=prob TCN
+  E/D tcn_ae_19667e76  channel_form=prob TCN
+  E/D tcn_ae_3083c9f6  channel_form=prob TCN
+  E/D tcn_ae_95266a32  channel_form=prob TCN
+  E/D tcn_ae_8b96e51f  channel_form=prob TCN
+  E/D tcn_ae_07d7ce6a  channel_form=prob TCN
+  E/D tcn_ae_9e2a640f  channel_form=prob TCN
+  E/D tcn_ae_5fd3d86f  channel_form=prob TCN
+  E/D tcn_ae_a7208d61  channel_form=nonprob LRU
+  E/D tcn_ae_479d655c  channel_form=nonprob LRU
+  E/D tcn_ae_eb2bce7b  channel_form=nonprob LRU
+  E/D tcn_ae_707e2fd4  channel_form=nonprob LRU
+  E/D tcn_ae_73efd2e3  channel_form=nonprob LRU
+  E/D tcn_ae_93414b1e  channel_form=nonprob LRU
+  E/D tcn_ae_f326eaa7  channel_form=nonprob LRU
+  E/D tcn_ae_c0bab674  channel_form=nonprob LRU
+  E/D tcn_ae_c08ba84e  channel_form=nonprob LRU
+  E/D tcn_ae_d353db5f  channel_form=prob LRU
+  E/D tcn_ae_3396b259  channel_form=prob LRU
+  E/D tcn_ae_adbac5b6  channel_form=prob LRU
+  E/D tcn_ae_412ce655  channel_form=prob LRU
+  E/D tcn_ae_f213a3cd  channel_form=prob LRU
+  E/D tcn_ae_22274c96  channel_form=prob LRU
+  E/D tcn_ae_277f9239  channel_form=prob LRU
+  E/D tcn_ae_bc02e358  channel_form=prob LRU
+  E/D tcn_ae_6e1091da  channel_form=prob LRU
+  E/D tcn_ae_778fe186  channel_form=prob LRU
+  E/D tcn_ae_c1f3c0b1  channel_form=prob LRU
+  E/D tcn_ae_930865f5  channel_form=prob LRU
+  E/D tcn_ae_2f0bfd04  channel_form=prob LRU
+  E/D tcn_ae_3b28123b  channel_form=prob LRU
+  E/D tcn_ae_f3af1c27  channel_form=prob LRU
+  E/D tcn_ae_ffe5cf1a  channel_form=prob LRU
+  E/D tcn_ae_6901b84c  channel_form=prob LRU
+  E/D tcn_ae_7ded80b2  channel_form=prob LRU
+  E/D tcn_ae_2c2761f4  channel_form=prob LRU
+  E/D tcn_ae_42df7718  channel_form=prob LRU
+  E/D tcn_ae_527d07df  channel_form=prob LRU
+  E/D tcn_ae_26c50470  channel_form=prob LRU
+  E/D tcn_ae_6dc5e23f  channel_form=prob LRU
+  E/D tcn_ae_2f4b5420  channel_form=prob LRU
+  E/D tcn_ae_72c76649  channel_form=prob LRU
+  E/D tcn_ae_9c22a64d  channel_form=prob LRU
+  E/D tcn_ae_cf95091a  channel_form=prob LRU
+  E/D tcn_ae_be771d61  channel_form=prob LRU
+  E/D tcn_ae_28ca17b6  channel_form=prob LRU
+  E/D tcn_ae_6388c33d  channel_form=prob LRU
+  E/D tcn_ae_c6174113  channel_form=prob LRU
+  E/D tcn_ae_3c9d6a7a  channel_form=prob LRU
+  E/D tcn_ae_b8b65955  channel_form=prob LRU
+  E/D tcn_ae_5c22ba7a  channel_form=prob LRU
+  E/D tcn_ae_6e226b1b  channel_form=prob LRU
+  E/D tcn_ae_e5ac96ff  channel_form=prob LRU
+  E/D tcn_ae_13914f53  channel_form=gmp
+  E/D tcn_ae_939c9a6c  channel_form=gmp
+  E/D tcn_ae_94f445fe  channel_form=gmp
+  E/D tcn_ae_265bc086  channel_form=gmp
+  E/D tcn_ae_d9ad26b6  channel_form=nonprob TCN
+  E/D tcn_ae_6badc451  channel_form=nonprob TCN
+  E/D tcn_ae_1c7538ff  channel_form=nonprob TCN
+  E/D tcn_ae_69a416a9  channel_form=nonprob TCN
+  E/D tcn_ae_c4082abb  channel_form=nonprob TCN
+  E/D tcn_ae_b0bdb783  channel_form=nonprob TCN
+  E/D tcn_ae_d8cc3cd6  channel_form=prob TCN
+  E/D tcn_ae_696842c6  channel_form=prob TCN
+  E/D tcn_ae_987b3378  channel_form=prob TCN
+  E/D tcn_ae_80bbeae6  channel_form=prob TCN
+  E/D tcn_ae_3ed7dba2  channel_form=prob TCN
+  E/D tcn_ae_2e73a16e  channel_form=prob TCN
+  E/D tcn_ae_23efb44f  channel_form=prob TCN
+  E/D tcn_ae_e5a776c2  channel_form=prob TCN
+  E/D tcn_ae_db2096a5  channel_form=prob TCN
+  E/D tcn_ae_d892c084  channel_form=prob TCN
+  E/D tcn_ae_ae3d5081  channel_form=prob TCN
+  E/D tcn_ae_40626486  channel_form=prob TCN
+  E/D tcn_ae_d7c66739  channel_form=prob TCN
+  E/D tcn_ae_a43da381  channel_form=prob TCN
+  E/D tcn_ae_120ea8e4  channel_form=prob TCN
+  E/D tcn_ae_0e23c638  channel_form=prob TCN
+  E/D tcn_ae_e52038e2  channel_form=prob TCN
+  E/D tcn_ae_7aa5986b  channel_form=prob TCN
+  E/D tcn_ae_9c0b6b9c  channel_form=prob TCN
+  E/D tcn_ae_d6266903  channel_form=prob TCN
+  E/D tcn_ae_38747c3c  channel_form=prob TCN
+  E/D tcn_ae_98ebf7d7  channel_form=prob TCN
+  E/D tcn_ae_0b620d9a  channel_form=prob TCN
+  E/D tcn_ae_f658bbf8  channel_form=prob TCN
+  E/D tcn_ae_9c3ea35d  channel_form=prob TCN
+  E/D tcn_ae_27146910  channel_form=prob TCN
+  E/D tcn_ae_faf1d6c4  channel_form=prob TCN
+  E/D tcn_ae_a378999d  channel_form=prob TCN
+  E/D tcn_ae_782a2696  channel_form=prob TCN
+  E/D tcn_ae_34627589  channel_form=prob TCN
+  E/D tcn_ae_3f9e21aa  channel_form=prob TCN
+  E/D tcn_ae_d0e1214d  channel_form=prob TCN
+  E/D tcn_ae_4da19617  channel_form=prob TCN
+  E/D tcn_ae_a40d4b70  channel_form=prob TCN
+  E/D tcn_ae_3f5d0dd1  channel_form=prob TCN
+  E/D tcn_ae_05acf268  channel_form=prob TCN
+  E/D tcn_ae_4f21d20b  channel_form=prob TCN
+  E/D tcn_ae_869b3faf  channel_form=prob TCN
+  E/D tcn_ae_95e21c03  channel_form=prob TCN
+  E/D tcn_ae_70ee3e74  channel_form=prob TCN
+  E/D tcn_ae_0c539837  channel_form=prob TCN
+  E/D tcn_ae_977b42af  channel_form=prob TCN
+  E/D tcn_ae_229ba629  channel_form=prob TCN
+  E/D tcn_ae_b5c27688  channel_form=prob TCN
+  E/D tcn_ae_b04fca58  channel_form=prob TCN
+  E/D tcn_ae_336a1b3e  channel_form=prob TCN
+  E/D tcn_ae_c92cd968  channel_form=prob TCN
+  E/D tcn_ae_104f9ac4  channel_form=prob TCN
+  E/D tcn_ae_cd24951e  channel_form=nonprob LRU
+  E/D tcn_ae_ba449f74  channel_form=nonprob LRU
+  E/D tcn_ae_384f7edc  channel_form=nonprob LRU
+  E/D tcn_ae_ee85337a  channel_form=nonprob LRU
+  E/D tcn_ae_ea69b6ae  channel_form=nonprob LRU
+  E/D tcn_ae_1a044807  channel_form=nonprob LRU
+  E/D tcn_ae_c10219c2  channel_form=nonprob LRU
+  E/D tcn_ae_6c0ad129  channel_form=nonprob LRU
+  E/D tcn_ae_bf4ddd7b  channel_form=nonprob LRU
+  E/D tcn_ae_2d876aac  channel_form=prob LRU
+  E/D tcn_ae_51411d03  channel_form=prob LRU
+  E/D tcn_ae_1ab62ea8  channel_form=prob LRU
+  E/D tcn_ae_523b8fbc  channel_form=prob LRU
+  E/D tcn_ae_ef4fe6a5  channel_form=prob LRU
+  E/D tcn_ae_cb916a97  channel_form=prob LRU
+  E/D tcn_ae_3c7bcc34  channel_form=prob LRU
+  E/D tcn_ae_1addf2ef  channel_form=prob LRU
+  E/D tcn_ae_3f241aa6  channel_form=prob LRU
+  E/D tcn_ae_0ab7ff70  channel_form=prob LRU
+  E/D tcn_ae_a46f8805  channel_form=prob LRU
+  E/D tcn_ae_bb6e531e  channel_form=prob LRU
+  E/D tcn_ae_03535f41  channel_form=prob LRU
+  E/D tcn_ae_cf8749b6  channel_form=prob LRU
+  E/D tcn_ae_cfadc532  channel_form=prob LRU
+  E/D tcn_ae_69246313  channel_form=prob LRU
+  E/D tcn_ae_523a3702  channel_form=prob LRU
+  E/D tcn_ae_36a11682  channel_form=prob LRU
+  E/D tcn_ae_1020dd6f  channel_form=prob LRU
+  E/D tcn_ae_88509d9c  channel_form=prob LRU
+  E/D tcn_ae_57e5f85c  channel_form=prob LRU
+  E/D tcn_ae_ff554530  channel_form=prob LRU
+  E/D tcn_ae_a1b63e50  channel_form=prob LRU
+  E/D tcn_ae_f06616f3  channel_form=prob LRU
+  E/D tcn_ae_96250062  channel_form=prob LRU
+  E/D tcn_ae_8b0174cc  channel_form=prob LRU
+  E/D tcn_ae_89ff161d  channel_form=prob LRU
+  E/D tcn_ae_d8efaa08  channel_form=prob LRU
+  E/D tcn_ae_aa85c779  channel_form=prob LRU
+  E/D tcn_ae_399b150d  channel_form=prob LRU
+  E/D tcn_ae_69d03b2f  channel_form=prob LRU
+  E/D tcn_ae_a67e01f6  channel_form=prob LRU
+  E/D tcn_ae_f2791048  channel_form=prob LRU
+  E/D tcn_ae_8c39b57c  channel_form=prob LRU
+  E/D tcn_ae_ea1360cf  channel_form=prob LRU
+  E/D tcn_ae_004ffc1e  channel_form=prob LRU
+  E/D tcn_ae_e80169cc  channel_form=gmp
+  E/D tcn_ae_980c40bc  channel_form=gmp
+  E/D tcn_ae_0a853420  channel_form=gmp
+  E/D tcn_ae_99179de6  channel_form=gmp
+  E/D tcn_ae_914a101a  channel_form=nonprob TCN
+  E/D tcn_ae_1acbf7cb  channel_form=nonprob TCN
+  E/D tcn_ae_047a1e3a  channel_form=nonprob TCN
+  E/D tcn_ae_e3d17dc9  channel_form=nonprob TCN
+  E/D tcn_ae_97c99fb8  channel_form=nonprob TCN
+  E/D tcn_ae_784ab32d  channel_form=nonprob TCN
+  E/D tcn_ae_376f57e3  channel_form=prob TCN
+  E/D tcn_ae_bd5cc8d0  channel_form=prob TCN
+  E/D tcn_ae_3a9af9ce  channel_form=prob TCN
+  E/D tcn_ae_31c7b460  channel_form=prob TCN
+  E/D tcn_ae_d7646d15  channel_form=prob TCN
+  E/D tcn_ae_355e8f7c  channel_form=prob TCN
+  E/D tcn_ae_51b0f1fa  channel_form=prob TCN
+  E/D tcn_ae_5a82cfda  channel_form=prob TCN
+  E/D tcn_ae_5696193a  channel_form=prob TCN
+  E/D tcn_ae_373ae92a  channel_form=prob TCN
+  E/D tcn_ae_e6925ff6  channel_form=prob TCN
+  E/D tcn_ae_20a55097  channel_form=prob TCN
+  E/D tcn_ae_5ea48759  channel_form=prob TCN
+  E/D tcn_ae_62c7129c  channel_form=prob TCN
+  E/D tcn_ae_7a005271  channel_form=prob TCN
+  E/D tcn_ae_50a4309b  channel_form=prob TCN
+  E/D tcn_ae_2227874b  channel_form=prob TCN
+  E/D tcn_ae_f76e293a  channel_form=prob TCN
+  E/D tcn_ae_95a8823f  channel_form=prob TCN
+  E/D tcn_ae_b040e879  channel_form=prob TCN
+  E/D tcn_ae_c353b608  channel_form=prob TCN
+  E/D tcn_ae_4ddf7f77  channel_form=prob TCN
+  E/D tcn_ae_431222e2  channel_form=prob TCN
+  E/D tcn_ae_1cbe3890  channel_form=prob TCN
+  E/D tcn_ae_8a83c0b8  channel_form=prob TCN
+  E/D tcn_ae_c37030ab  channel_form=prob TCN
+  E/D tcn_ae_0c3c0d7a  channel_form=prob TCN
+  E/D tcn_ae_c2700a83  channel_form=prob TCN
+  E/D tcn_ae_3f7c708e  channel_form=prob TCN
+  E/D tcn_ae_76ef982f  channel_form=prob TCN
+  E/D tcn_ae_0a42ed8e  channel_form=prob TCN
+  E/D tcn_ae_2ccfac7b  channel_form=prob TCN
+  E/D tcn_ae_4b21b08e  channel_form=prob TCN
+  E/D tcn_ae_b633a709  channel_form=prob TCN
+  E/D tcn_ae_705328a9  channel_form=prob TCN
+  E/D tcn_ae_63dccce9  channel_form=prob TCN
+  E/D tcn_ae_2c170236  channel_form=prob TCN
+  E/D tcn_ae_a2110a97  channel_form=prob TCN
+  E/D tcn_ae_fe51caf5  channel_form=prob TCN
+  E/D tcn_ae_d6cbb488  channel_form=prob TCN
+  E/D tcn_ae_ec3e527c  channel_form=prob TCN
+  E/D tcn_ae_41bf9846  channel_form=prob TCN
+  E/D tcn_ae_f1a8bc00  channel_form=prob TCN
+  E/D tcn_ae_12a544d5  channel_form=prob TCN
+  E/D tcn_ae_6e064cbf  channel_form=prob TCN
+  E/D tcn_ae_f5bc32df  channel_form=prob TCN
+  E/D tcn_ae_762fccbf  channel_form=prob TCN
+  E/D tcn_ae_16bc3719  channel_form=prob TCN
+  E/D tcn_ae_a8409afd  channel_form=nonprob LRU
+  E/D tcn_ae_d34dbc21  channel_form=nonprob LRU
+  E/D tcn_ae_71996442  channel_form=nonprob LRU
+  E/D tcn_ae_712b32cc  channel_form=nonprob LRU
+  E/D tcn_ae_e7a1deca  channel_form=nonprob LRU
+  E/D tcn_ae_e012978e  channel_form=nonprob LRU
+  E/D tcn_ae_277103aa  channel_form=nonprob LRU
+  E/D tcn_ae_19995987  channel_form=nonprob LRU
+  E/D tcn_ae_a6d42312  channel_form=nonprob LRU
+  E/D tcn_ae_628c7536  channel_form=prob LRU
+  E/D tcn_ae_2c302ca9  channel_form=prob LRU
+  E/D tcn_ae_be71a068  channel_form=prob LRU
+  E/D tcn_ae_e85a929f  channel_form=prob LRU
+  E/D tcn_ae_c7ff0373  channel_form=prob LRU
+  E/D tcn_ae_c8eb4913  channel_form=prob LRU
+  E/D tcn_ae_97f61799  channel_form=prob LRU
+  E/D tcn_ae_599091cb  channel_form=prob LRU
+  E/D tcn_ae_325369fd  channel_form=prob LRU
+  E/D tcn_ae_1729ec6c  channel_form=prob LRU
+  E/D tcn_ae_d5468cce  channel_form=prob LRU
+  E/D tcn_ae_a29a8e8d  channel_form=prob LRU
+  E/D tcn_ae_dfdd2919  channel_form=prob LRU
+  E/D tcn_ae_a3166060  channel_form=prob LRU
+  E/D tcn_ae_9bbe214d  channel_form=prob LRU
+  E/D tcn_ae_c7e52c26  channel_form=prob LRU
+  E/D tcn_ae_bfdc25f4  channel_form=prob LRU
+  E/D tcn_ae_8c2b913d  channel_form=prob LRU
+  E/D tcn_ae_d5fdd68d  channel_form=prob LRU
+  E/D tcn_ae_b4e77d3e  channel_form=prob LRU
+  E/D tcn_ae_68511998  channel_form=prob LRU
+  E/D tcn_ae_819a43de  channel_form=prob LRU
+  E/D tcn_ae_6cd1a440  channel_form=prob LRU
+  E/D tcn_ae_6389e734  channel_form=prob LRU
+  E/D tcn_ae_7b78e351  channel_form=prob LRU
+  E/D tcn_ae_a28aeae2  channel_form=prob LRU
+  E/D tcn_ae_4baee22e  channel_form=prob LRU
+  E/D tcn_ae_cccd3795  channel_form=prob LRU
+  E/D tcn_ae_93aa4fee  channel_form=prob LRU
+  E/D tcn_ae_3898d738  channel_form=prob LRU
+  E/D tcn_ae_d0b94f75  channel_form=prob LRU
+  E/D tcn_ae_04925117  channel_form=prob LRU
+  E/D tcn_ae_40ab7869  channel_form=prob LRU
+  E/D tcn_ae_beda0ede  channel_form=prob LRU
+  E/D tcn_ae_a01d3798  channel_form=prob LRU
+  E/D tcn_ae_2eaa11e8  channel_form=prob LRU
+  E/D tcn_ae_962f6dd7  channel_form=gmp
+  E/D tcn_ae_276e4a8e  channel_form=gmp
+  E/D tcn_ae_8e3248ba  channel_form=gmp
+  E/D tcn_ae_faa4c75d  channel_form=gmp
+  E/D tcn_ae_7c1e0844  channel_form=nonprob TCN
+  E/D tcn_ae_036ec24f  channel_form=nonprob TCN
+  E/D tcn_ae_ed12e45d  channel_form=nonprob TCN
+  E/D tcn_ae_24c71ad4  channel_form=nonprob TCN
+  E/D tcn_ae_5b21e32b  channel_form=nonprob TCN
+  E/D tcn_ae_8b48d225  channel_form=nonprob TCN
+  E/D tcn_ae_aaa62f19  channel_form=prob TCN
+  E/D tcn_ae_ce26a76a  channel_form=prob TCN
+  E/D tcn_ae_c68b6c95  channel_form=prob TCN
+  E/D tcn_ae_f14dbeda  channel_form=prob TCN
+  E/D tcn_ae_ad64973e  channel_form=prob TCN
+  E/D tcn_ae_f52c3652  channel_form=prob TCN
+  E/D tcn_ae_aab53db3  channel_form=prob TCN
+  E/D tcn_ae_b630d76c  channel_form=prob TCN
+  E/D tcn_ae_a93ec051  channel_form=prob TCN
+  E/D tcn_ae_64da1686  channel_form=prob TCN
+  E/D tcn_ae_ae5e40e0  channel_form=prob TCN
+  E/D tcn_ae_33316928  channel_form=prob TCN
+  E/D tcn_ae_2d683f43  channel_form=prob TCN
+  E/D tcn_ae_f7483daf  channel_form=prob TCN
+  E/D tcn_ae_2e13cc2c  channel_form=prob TCN
+  E/D tcn_ae_b98c5913  channel_form=prob TCN
+  E/D tcn_ae_4dbb8b13  channel_form=prob TCN
+  E/D tcn_ae_e3f988dd  channel_form=prob TCN
+  E/D tcn_ae_9f7b0dc9  channel_form=prob TCN
+  E/D tcn_ae_6cb1ed71  channel_form=prob TCN
+  E/D tcn_ae_319806b3  channel_form=prob TCN
+  E/D tcn_ae_17528fa8  channel_form=prob TCN
+  E/D tcn_ae_000ebef5  channel_form=prob TCN
+  E/D tcn_ae_93940b06  channel_form=prob TCN
+  E/D tcn_ae_22ef92b8  channel_form=prob TCN
+  E/D tcn_ae_19b37fe5  channel_form=prob TCN
+  E/D tcn_ae_9fc01a3e  channel_form=prob TCN
+  E/D tcn_ae_cf5d67af  channel_form=prob TCN
+  E/D tcn_ae_4b99a075  channel_form=prob TCN
+  E/D tcn_ae_0de781a7  channel_form=prob TCN
+  E/D tcn_ae_3b3dc474  channel_form=prob TCN
+  E/D tcn_ae_66784414  channel_form=prob TCN
+  E/D tcn_ae_c5ab43d6  channel_form=prob TCN
+  E/D tcn_ae_dfe450cc  channel_form=prob TCN
+  E/D tcn_ae_7fd6f464  channel_form=prob TCN
+  E/D tcn_ae_77804da5  channel_form=prob TCN
+  E/D tcn_ae_b9666092  channel_form=prob TCN
+  E/D tcn_ae_b89e6fbc  channel_form=prob TCN
+  E/D tcn_ae_7db226b1  channel_form=prob TCN
+  E/D tcn_ae_2c0299ed  channel_form=prob TCN
+  E/D tcn_ae_f74866ca  channel_form=prob TCN
+  E/D tcn_ae_3d283a80  channel_form=prob TCN
+  E/D tcn_ae_39022a45  channel_form=prob TCN
+  E/D tcn_ae_1e4e76ef  channel_form=prob TCN
+  E/D tcn_ae_19f369b5  channel_form=prob TCN
+  E/D tcn_ae_c13ab52b  channel_form=prob TCN
+  E/D tcn_ae_e0015e56  channel_form=prob TCN
+  E/D tcn_ae_889e7098  channel_form=prob TCN
+  E/D tcn_ae_6cf3bf1f  channel_form=nonprob LRU
+  E/D tcn_ae_e55df362  channel_form=nonprob LRU
+  E/D tcn_ae_80060c54  channel_form=nonprob LRU
+  E/D tcn_ae_25e25651  channel_form=nonprob LRU
+  E/D tcn_ae_87f5debd  channel_form=nonprob LRU
+  E/D tcn_ae_f7142ae4  channel_form=nonprob LRU
+  E/D tcn_ae_0a43308e  channel_form=nonprob LRU
+  E/D tcn_ae_403f3f02  channel_form=nonprob LRU
+  E/D tcn_ae_31dbd5a8  channel_form=nonprob LRU
+  E/D tcn_ae_5e7cca00  channel_form=prob LRU
+  E/D tcn_ae_0e10fe88  channel_form=prob LRU
+  E/D tcn_ae_542119b8  channel_form=prob LRU
+  E/D tcn_ae_a72c3ac7  channel_form=prob LRU
+  E/D tcn_ae_54d835a1  channel_form=prob LRU
+  E/D tcn_ae_ecba03a8  channel_form=prob LRU
+  E/D tcn_ae_3c592df0  channel_form=prob LRU
+  E/D tcn_ae_09364e55  channel_form=prob LRU
+  E/D tcn_ae_668f4980  channel_form=prob LRU
+  E/D tcn_ae_441d0325  channel_form=prob LRU
+  E/D tcn_ae_4218d2d4  channel_form=prob LRU
+  E/D tcn_ae_f88070e1  channel_form=prob LRU
+  E/D tcn_ae_ab999ba6  channel_form=prob LRU
+  E/D tcn_ae_48fba0d9  channel_form=prob LRU
+  E/D tcn_ae_1f88ed6d  channel_form=prob LRU
+  E/D tcn_ae_2d7ede69  channel_form=prob LRU
+  E/D tcn_ae_069d0b9b  channel_form=prob LRU
+  E/D tcn_ae_d2f92c98  channel_form=prob LRU
+  E/D tcn_ae_1ca31cc1  channel_form=prob LRU
+  E/D tcn_ae_268665b7  channel_form=prob LRU
+  E/D tcn_ae_bbd28fa6  channel_form=prob LRU
+  E/D tcn_ae_d3fae415  channel_form=prob LRU
+  E/D tcn_ae_c107deef  channel_form=prob LRU
+  E/D tcn_ae_4a314d42  channel_form=prob LRU
+  E/D tcn_ae_b449d230  channel_form=prob LRU
+  E/D tcn_ae_fea2e2fb  channel_form=prob LRU
+  E/D tcn_ae_c33e5ddd  channel_form=prob LRU
+  E/D tcn_ae_ba34161d  channel_form=prob LRU
+  E/D tcn_ae_a40e3953  channel_form=prob LRU
+  E/D tcn_ae_958652e3  channel_form=prob LRU
+  E/D tcn_ae_d37633a0  channel_form=prob LRU
+  E/D tcn_ae_c084e57a  channel_form=prob LRU
+  E/D tcn_ae_56739730  channel_form=prob LRU
+  E/D tcn_ae_effc3f35  channel_form=prob LRU
+  E/D tcn_ae_17697000  channel_form=prob LRU
+  E/D tcn_ae_53db78cb  channel_form=prob LRU
+[check_channel 06:30:19] [pre-validation] 1 MHz Vrms = 0.1379 V  (128-avg, mode=AVERAGE)
+[grid] experiment dir: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/new_heath_ed_validation_20260707_0630  (412 points)
+[grid] (1/412) done tcn_ae_cf817e4d_aec6616e
+[grid] (2/412) done tcn_ae_b2308e48_49ffa1f7
+[grid] (3/412) done tcn_ae_0e1e6749_f1d0e284
+[grid] (4/412) done tcn_ae_35aa47b4_73e2edfb
+[grid] (5/412) done tcn_ae_77af3119_7fed4ba8
+[grid] (6/412) done tcn_ae_d08328a4_74eb8ba2
+[grid] (7/412) done tcn_ae_61c541e9_188bc367
+[grid] (8/412) done tcn_ae_782e1cc2_7e10d31d
+[grid] (9/412) done tcn_ae_119e5441_3a26548c
+[grid] (10/412) done tcn_ae_7a4cdfcd_8e6dd7ef
+[grid] (11/412) done tcn_ae_56c9025f_9a3dba74
+[grid] (12/412) done tcn_ae_c6115a06_b8bba9e5
+[grid] (13/412) done tcn_ae_4c6fd3a5_2b61050f
+[grid] (14/412) done tcn_ae_c530a734_a3bee1b8
+[grid] (15/412) done tcn_ae_3123131e_b70a3f17
+[grid] (16/412) done tcn_ae_6b60d83e_e569ca89
+[grid] (17/412) done tcn_ae_63573628_d191bf5b
+[grid] (18/412) done tcn_ae_bee946f4_03634287
+[grid] (19/412) done tcn_ae_98e959dc_7c8e35a0
+[grid] (20/412) done tcn_ae_5300f614_b9f59efe
+[grid] (21/412) done tcn_ae_23ac2aee_ffeae503
+[grid] (22/412) done tcn_ae_b60671c9_2d0ea6db
+[grid] (23/412) done tcn_ae_7f4c4b22_f98d0687
+[grid] (24/412) done tcn_ae_42cec8d9_18566490
+[grid] (25/412) done tcn_ae_9c4a18f9_222d6738
+[grid] (26/412) done tcn_ae_28bf2054_3c4ad03e
+[grid] (27/412) done tcn_ae_e98aff0e_4da6ca9c
+[grid] (28/412) done tcn_ae_afe354ca_3a729a23
+[grid] (29/412) done tcn_ae_d65b3e78_c8d04248
+[grid] (30/412) done tcn_ae_58279d93_2b628450
+[grid] (31/412) done tcn_ae_62a14443_d639aaaa
+[grid] (32/412) done tcn_ae_4b11523b_d6624516
+[grid] (33/412) done tcn_ae_d49edc9f_2f3188cf
+[grid] (34/412) done tcn_ae_002ab123_1acb45dc
+[grid] (35/412) done tcn_ae_2810577d_c5e2fa9d
+[grid] (36/412) done tcn_ae_b291b73e_de07ebfc
+[grid] (37/412) done tcn_ae_e3b2e5ba_54a05544
+[grid] (38/412) done tcn_ae_658117a4_d974fb27
+[grid] (39/412) done tcn_ae_ff17b811_04e7f5ea
+[grid] (40/412) done tcn_ae_1e94006b_de60ae54
+[grid] (41/412) done tcn_ae_0ea3f089_6443619d
+[grid] (42/412) done tcn_ae_a4f2ca44_12442551
+[grid] (43/412) done tcn_ae_5af3c117_f8f90217
+[grid] (44/412) done tcn_ae_f1eeb2f0_e09607a4
+[grid] (45/412) done tcn_ae_e6cda063_25f6970e
+[grid] (46/412) done tcn_ae_63633cce_502d5d6a
+[grid] (47/412) done tcn_ae_e3977a64_40bad674
+[grid] (48/412) done tcn_ae_9e708b40_63d4e0a5
+[grid] (49/412) done tcn_ae_de3560ba_b475b0ea
+[grid] (50/412) done tcn_ae_fcdcdb52_21232ac2
+[grid] (51/412) done tcn_ae_476e93ea_830aca1b
+[grid] (52/412) done tcn_ae_19667e76_d91ca4d3
+[grid] (53/412) done tcn_ae_3083c9f6_2025652f
+[grid] (54/412) done tcn_ae_95266a32_ea45819d
+[grid] (55/412) done tcn_ae_8b96e51f_6da64f55
+[grid] (56/412) done tcn_ae_07d7ce6a_b46c1099
+[grid] (57/412) done tcn_ae_9e2a640f_6430daef
+[grid] (58/412) done tcn_ae_5fd3d86f_42b7001d
+[grid] (59/412) done tcn_ae_a7208d61_e161bbc1
+[grid] (60/412) done tcn_ae_479d655c_e77c7f64
+[grid] (61/412) done tcn_ae_eb2bce7b_2198e795
+[grid] (62/412) done tcn_ae_707e2fd4_5771b840
+[grid] (63/412) done tcn_ae_73efd2e3_e7a6d283
+[grid] (64/412) done tcn_ae_93414b1e_7555b45e
+[grid] (65/412) done tcn_ae_f326eaa7_ab976c0a
+[grid] (66/412) done tcn_ae_c0bab674_1af045c9
+[grid] (67/412) done tcn_ae_c08ba84e_2ad48fe9
+[grid] (68/412) done tcn_ae_d353db5f_1eef427c
+[grid] (69/412) done tcn_ae_3396b259_fdc69f63
+[grid] (70/412) done tcn_ae_adbac5b6_09b5e1c5
+[grid] (71/412) done tcn_ae_412ce655_6489846d
+[grid] (72/412) done tcn_ae_f213a3cd_46b36dd3

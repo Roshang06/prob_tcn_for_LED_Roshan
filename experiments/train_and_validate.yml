@@ -8,7 +8,7 @@ RUNTIME:
 # ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/encoder_decoder_YYYYMMDD_HHMM
 
 
-CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/mint_surf_channel_models_20260704_2358
+# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/mint_surf_channel_models_20260704_2358
 # ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/azure_vault_encoder_decoder_20260629_0738
 HARDWARE_RESOURCES:
     Agilent_33250A:
@@ -33,7 +33,7 @@ DATA_COLLECTION:
   PREAMBLE_LENGTH: 256
   MODULATION_FORMAT: "m7_apsk_constellation"
   OSC_SCALE: 0.5 # V/div
-  POWER_MIN: 0.5  # minimum symbol power
+  POWER_MIN: 0.2  # minimum symbol power
   POWER_MAX: 3.0  # maximum symbol power; at 3 the +/-3 clip becomes apparent
   JITTER_POWER: 0.2 # off-constellation complex noise on symbols (collection only); 0 disables
   DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/dc0.05A_fmin300000_fmax7.6e+06_20260703_1631.zarr
@@ -51,8 +51,8 @@ CHANNEL_GRID_SEARCH:
   models:
     - model: gmp
       params:
-        memory_linear: 49
-        memory_nonlinear: 49
+        memory_linear: 105
+        memory_nonlinear: 105
         nonlinearity_order: [3, 4]
         cross_term_depth: [8, 16]
         ridge: 1.0e-3
@@ -63,11 +63,11 @@ CHANNEL_GRID_SEARCH:
         hidden_channels: [8, 16]
         kernel_size: [8]
         dilation_base: 2
-        epochs: 150
+        epochs: 200
         lr: 1.0e-3
         batch_size: 16
         factor: 0.5 # Learning rate scheduler
-        patience: 5
+        patience: 25
         min_lr: 1.0e-6
         distribution: ["none"]
 
@@ -75,16 +75,16 @@ CHANNEL_GRID_SEARCH:
       params:
         nlayers: [2, 3, 4]
         hidden_channels: [8, 16]
-        kernel_size: [8]
+        kernel_size: [4, 8]
         dilation_base: 2
-        epochs: 150
+        epochs: 200
         lr: 1.0e-3
         batch_size: 16
         factor: 0.5 # Learning rate scheduler
-        patience: 5
+        patience: 25
         min_lr: 1.0e-6
         distribution: ["gaussian", "students_t"]
-        beta_nll: [0.5]
+        beta_nll: [0.5, 1]
 
     - model: lru   # Linear Recurrent Unit
       params:
@@ -99,7 +99,7 @@ CHANNEL_GRID_SEARCH:
         lr: 1.0e-3
         batch_size: 16
         factor: 0.5 # Learning rate scheduler
-        patience: 5
+        patience: 10
         min_lr: 1.0e-6
         distribution: ["none"]
 
@@ -112,29 +112,29 @@ CHANNEL_GRID_SEARCH:
         r_min: 0.0
         r_max: 1.0
         max_phase: 6.28
-        epochs: 150
+        epochs: 200
         lr: 1.0e-3
         batch_size: 16
         factor: 0.5
-        patience: 5
+        patience: 25
         min_lr: 1.0e-6
         distribution: ["gaussian", "students_t"]
-        beta_nll: [0.5]
+        beta_nll: [0.5, 1]
 
 ENCODER_DECODER:
   CONSTELLATION: qpsk
   PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to +-this
   params:
-    nlayers: [3]
+    nlayers: [1, 2]
     dilation_base: [2]
-    kernel_size: [6]
+    kernel_size: [4, 8, 16]
     hidden_channels: [16]
-    epochs: 200
+    epochs: 1000
     lr: 1.0e-3
-    weight_decay: 1.0e-5    # AdamW L2 regularization; 0 disables. List -> swept.
+    weight_decay: [0, 1e-5]  # AdamW L2 regularization; 0 disables.
     batch_size: 16
     factor: 0.5 # Learning rate scheduler
-    patience: 3
+    patience: 50
     min_lr: 1.0e-6
 
 ENCODER_DECODER_VALIDATION:

@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────────
-DATASET_PATH = "data/sweeps/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr"
+DATASET_PATH = "data/sweeps/dc0.05A_fmin300000_fmax7.6e+06_20260703_1631_pred_tcn_2a652fa2.zarr"
 PLOT_PATH    = HERE.parent / "data/plots"
 # ────────────────────────────────────────────────────────────────────────────────
 
@@ -47,7 +47,7 @@ def main():
     H = np.mean(R / S, axis=0)
 
     f_khz = ks * (fs / x.shape[1]) / 1e3
-    mag_db = 20 * np.log10(np.abs(H))
+    mag_db = 10 * np.log10(np.abs(H))
     phase  = np.unwrap(np.angle(H))
 
     # linear-delay fit: slope = bulk group delay (STO + bulk channel delay)
