@@ -1,7 +1,7 @@
 """
-predict_channel_output.py — run a trained channel model over a dataset and write
-its predicted output as a new zarr, laid out identically to the input dataset so
-it drops straight into channel_response.py.
+Run a trained channel model over a dataset and write its predicted output as a new
+zarr, laid out identically to the input dataset so it drops straight into
+channel_response.py.
 
 The channel model is trained on the OFDM symbol only (CP + payload, preamble
 dropped), so the prediction fills the [preamble:] region of received_burst; the
@@ -26,15 +26,14 @@ from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.orchestrator import select_channel_models
 from modules.utils import load_ofdm_dataset
 
-# ─── CONFIG ─────────────────────────────────────────────────────────────────────
-CHANNEL_EXP_DIR = "data/experiments/train_and_validate/new_heath_channel_models_20260706_1730"
-DATASET_PATH    = "data/sweeps/dc0.05A_fmin300000_fmax7.6e+06_20260703_1631.zarr"
-RUN_ID          = None            # None -> best run by SELECTION_METRIC; or "tcn_xxxxxxxx"
-SELECTION_METRIC = "val_rrmse_pct"
-OUTPUT_PATH     = None            # None -> alongside the dataset as <stem>_pred_<run_id>.zarr
-DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
-CHUNK_SIZE      = 512
-# ────────────────────────────────────────────────────────────────────────────────
+# Configuration
+CHANNEL_EXP_DIR = "data/experiments/train_and_validate/mint_surf_channel_models_20260704_2358"
+DATASET_PATH = "data/sweeps/dc0.05A_fmin300000_fmax7.6e+06_20260703_1631.zarr"
+RUN_ID = None            # None -> best run by SELECTION_METRIC; or "tcn_xxxxxxxx"
+SELECTION_METRIC = "val_per_burst_rrmse_pct"
+OUTPUT_PATH = None       # None -> alongside the dataset as <stem>_pred_<run_id>.zarr
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+CHUNK_SIZE = 512
 
 
 def choose_run_id(channel_exp_dir, run_id, metric):
@@ -45,7 +44,10 @@ def choose_run_id(channel_exp_dir, run_id, metric):
             in (channel_exp_dir / "runs.jsonl").read_text().splitlines() if line.strip()]
 
     def score(row):
-        return row.get(metric, row.get("rrmse_pct", float("inf")))
+        for key in (metric, "val_rrmse_pct", "per_burst_rrmse_pct", "rrmse_pct"):
+            if row.get(key) is not None:
+                return row[key]
+        return float("inf")
 
     best_row = min(rows, key=score)
     print(f"best run by {metric}: {best_row['run_id']}  "

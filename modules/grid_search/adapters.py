@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -23,23 +22,30 @@ _DIST_TO_FLAGS = {
 }
 
 
-def _beta_nll_reduce(per_element_nll, std, beta):
+def _burst_power_weights(sent_bursts):
+    '''Per-burst importance weights 1/P_b (P_b = mean(x²), the specified symbol
+    power).'''
+    return 1.0 / (sent_bursts ** 2).mean(dim=-1)
+
+
+def _power_weighted_beta_nll_reduce(per_element_nll, std, beta, burst_weights):
+    weighted_nll = burst_weights[:, None] * per_element_nll
     if not beta:
-        return torch.mean(per_element_nll)
-    return torch.mean((std.detach() ** (2.0 * beta)) * per_element_nll)
+        return torch.mean(weighted_nll)
+    return torch.mean((std.detach() ** (2.0 * beta)) * weighted_nll)
 
 
-def gaussian_nll(residual, std, beta=0.0):
+def power_weighted_gaussian_nll(residual, std, burst_weights, beta=0.0):
     per_element_nll = 0.5 * torch.log(2 * torch.pi * std ** 2) + 0.5 * (residual / std) ** 2
-    return _beta_nll_reduce(per_element_nll, std, beta)
+    return _power_weighted_beta_nll_reduce(per_element_nll, std, beta, burst_weights)
 
 
-def students_t_loss(residual, std, nu, beta=0.0):
+def power_weighted_students_t_loss(residual, std, nu, burst_weights, beta=0.0):
     z = residual / std
     term1 = (-torch.lgamma((nu + 1) / 2) + 0.5 * torch.log(torch.pi * nu)
              + torch.lgamma(nu / 2) + torch.log(std + 1e-8))
     term2 = ((nu + 1) / 2) * torch.log(1 + torch.square(z) / nu + 1e-8)
-    return _beta_nll_reduce(term1 + term2, std, beta)
+    return _power_weighted_beta_nll_reduce(term1 + term2, std, beta, burst_weights)
 
 
 @runtime_checkable
@@ -108,24 +114,35 @@ class TCNAdapter:
             return 0
         return min(self.model.receptive_field - 1, T - 1)
 
-    def _loss(self, xb, yb):
+    def _loss(self, xb, yb, beta=None):
         '''The training objective on one batch: Gaussian/Student-t NLL when the
-        model learns noise, plain MSE otherwise. With EXCLUDE_WARMUP the leading
-        receptive-field samples are dropped before the loss is taken.'''
+        model learns noise, MSE otherwise each weighted per burst by 1/P_b so
+        low-power bursts are not discounted (see _burst_power_weights). With
+        EXCLUDE_WARMUP the leading receptive-field samples are dropped before
+        the loss is taken. beta overrides self.beta_nll (used by _val_loss to
+        report the true beta=0 NLL).'''
+        if beta is None:
+            beta = self.beta_nll
         s = self._warmup_slice(xb.shape[-1])
+        burst_weights = _burst_power_weights(xb)
         if self.model.learn_noise:
             _, y_pred, y_pred_std, y_pred_nu = self.model(xb)
             residual = (yb - y_pred)[..., s:]
             std = y_pred_std[..., s:]
             if self.model.gaussian:
-                return gaussian_nll(residual, std, beta=self.beta_nll)
-            return students_t_loss(residual, std, y_pred_nu[..., s:], beta=self.beta_nll)
-        return F.mse_loss(self.model(xb)[..., s:], yb[..., s:])
+                return power_weighted_gaussian_nll(residual, std, burst_weights, beta=beta)
+            return power_weighted_students_t_loss(residual, std, y_pred_nu[..., s:], burst_weights,
+                                                  beta=beta)
+        squared_error = (self.model(xb)[..., s:] - yb[..., s:]) ** 2
+        return torch.mean(burst_weights[:, None] * squared_error)
 
     def _val_loss(self, X_val, Y_val) -> float:
+        '''True power-weighted NLL (beta=0), NOT the beta-NLL training value: the
+        beta-weighted number is sigma-scale-dependent and rises as sigma shrinks,
+        which misleads the LR scheduler and cross-run val_nll comparisons.'''
         self.model.eval()
         with torch.no_grad():
-            loss = self._loss(X_val, Y_val).item()
+            loss = self._loss(X_val, Y_val, beta=0).item()
         self.model.train()
         return loss
 
@@ -155,27 +172,45 @@ class TCNAdapter:
                 min_lr=float(self.train_params.get("min_lr", 1e-6)),
             )
 
+        grad_clip = float(self.train_params.get("grad_clip", 1.0))
+
         self.model.train()
         history = {"loss": [], "lr": []}
+        if self.model.learn_noise:
+            history["train_nll"] = []  # true beta=0 NLL, same scale as val_loss
         if has_val:
             history["val_loss"] = []
+        skipped_batches = 0
         for _ in range(epochs):
             epoch_loss, n_batches = 0.0, 0
             for xb, yb in loader:
                 optimizer.zero_grad()
                 loss = self._loss(xb, yb)
+                if not torch.isfinite(loss):
+                    skipped_batches += 1
+                    continue
                 loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+                if not torch.isfinite(grad_norm):
+                    skipped_batches += 1
+                    continue
+
                 optimizer.step()
                 epoch_loss += loss.item()
                 n_batches += 1
-            train_loss = epoch_loss / n_batches
+            train_loss = epoch_loss / max(n_batches, 1)
             history["loss"].append(train_loss)
             history["lr"].append(optimizer.param_groups[0]["lr"])
+            if self.model.learn_noise:
+                history["train_nll"].append(self._val_loss(X, Y))
             if has_val:
                 val_loss = self._val_loss(X_val, Y_val)
                 history["val_loss"].append(val_loss)
             if scheduler is not None:
                 scheduler.step(val_loss if has_val else train_loss)
+
+        if skipped_batches:
+            print(f"    [fit] skipped {skipped_batches} non-finite batches (grad_clip={grad_clip})")
         return history
 
     def predict(self, X):
@@ -193,8 +228,8 @@ class TCNAdapter:
 class LRUAdapter(TCNAdapter):
     '''Linear Recurrent Unit (deep linear-RNN / state-space) baseline.
 
-    Trains exactly like the TCN — same AdamW loop, Gaussian/Student-t NLL or MSE
-    objective, and probabilistic `distribution` switch — so it reuses everything
+    Trains exactly like the TCN (same AdamW loop, Gaussian/Student-t NLL or MSE
+    objective, and probabilistic `distribution` switch), so it reuses everything
     on TCNAdapter and only swaps in the LRU_channel construction. LRU_channel
     shares TCN_channel's forward contract (mean, or (noisy, mean, std, nu)) and
     exposes `receptive_field` (=1: an RNN has no fixed warm-up window).

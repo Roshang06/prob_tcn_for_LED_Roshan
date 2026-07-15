@@ -15,3 +15,4 @@ data/*/old/*
 *.DS_Store
 exp_state_cache_*
 data/experiments/*
+experiments/**/*.txt

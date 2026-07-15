@@ -118,14 +118,20 @@ class EncoderDecoderGridSearch(GridSearchBase):
         sent_time = torch.hstack((self.preamble.expand(batch_size, -1), sent_time))  # [preamble | CP | symbol]
         return torch.tensor(true_bits, device=self.device), sent_time
 
-    def _forward(self, encoder, decoder, channel_model, sent_time):
+    def _forward(self, encoder, decoder, channel_model, sent_time, noise_scale=1.0):
         # encode, pass through the channel, and decode only the OFDM symbol (CP + payload);
         # the preamble is never processed
         pre = self.preamble_length
         preamble, symbol = sent_time[:, :pre], sent_time[:, pre:]
         encoded_symbol = encoder(symbol).clamp(-self.clip_threshold, self.clip_threshold)
         channel_out = channel_model(encoded_symbol)
-        received_symbol = channel_out[0] if isinstance(channel_out, tuple) else channel_out
+        if isinstance(channel_out, tuple):
+            # probabilistic channel: scale the sampled noise realization around the mean
+            # so training noise can be annealed (noise_scale 1 = full noise, 0 = mean only)
+            noisy, mean = channel_out[0], channel_out[1]
+            received_symbol = mean + noise_scale * (noisy - mean)
+        else:
+            received_symbol = channel_out
         decoded_symbol = decoder(received_symbol)
         return torch.hstack((preamble, decoded_symbol))
 
@@ -195,16 +201,30 @@ class EncoderDecoderGridSearch(GridSearchBase):
         num_bits = len(ofdm_config.active_carrier_indices) * self.constellation.bits_per_symbol
         batch_size = p["batch_size"]
 
+        # channel-noise annealing: full noise until noise_anneal_start * epochs, then a
+        # linear decay reaching 0 at the final epoch (robust basin early, fine
+        # equalization late). 1.0 disables annealing and reproduces prior behavior.
+        epochs = int(p["epochs"])
+        noise_anneal_start = float(p.get("noise_anneal_start", 1.0))
+        anneal_start_epoch = int(round(noise_anneal_start * epochs))
+
         # fixed held-out batch so the BER-vs-epoch curve and the final
         # constellation plot are measured on consistent data across epochs
         eval_bits, eval_sent_time = self._sample_batch(batch_size, num_bits, ofdm_config)
 
         encoder.train()
         decoder.train()
-        history = {"loss": [], "ber": [], "lr": []}
-        for _ in range(p["epochs"]):
+        history = {"loss": [], "ber": [], "lr": [], "noise_scale": []}
+        for epoch in range(epochs):
+            if epoch < anneal_start_epoch:
+                noise_scale = 1.0
+            else:
+                noise_scale = 1.0 - (epoch - anneal_start_epoch) / max(epochs - 1 - anneal_start_epoch, 1)
+                noise_scale = max(0.0, noise_scale)
+
             _, sent_time = self._sample_batch(batch_size, num_bits, ofdm_config)
-            decoded_time = self._forward(encoder, decoder, channel_model, sent_time)
+            decoded_time = self._forward(encoder, decoder, channel_model, sent_time,
+                                         noise_scale=noise_scale)
             # loss on the OFDM symbol only; the preamble is never encoded/decoded
             offset = self.preamble_length
             loss = in_band_time_loss(sent_time[:, offset:], decoded_time[:, offset:],
@@ -218,6 +238,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
             history["loss"].append(loss.item())
             history["ber"].append(self._test_ber(encoder, decoder, channel_model, ofdm_config, eval_bits, eval_sent_time))
             history["lr"].append(optimizer.param_groups[0]["lr"])
+            history["noise_scale"].append(noise_scale)
 
         metrics = self._evaluate(encoder, decoder, channel_model, ofdm_config, num_bits, batch_size)
         metrics["num_params"] = encoder.get_num_params() + decoder.get_num_params()
@@ -248,7 +269,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         ax.plot(range(len(ber_curve)), ber_curve, marker=".", ms=3)
         ax.set_xlabel("epoch")
         ax.set_ylabel("BER")
-        ax.set_title(f"{run_dir.name} — BER vs epoch")
+        ax.set_title(f"{run_dir.name} - BER vs epoch")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)

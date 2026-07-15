@@ -1,5 +1,5 @@
 '''
-send_ofdm_symbol.py — minimal send/receive of single OFDM bursts on the live hardware.
+Minimal send/receive of single OFDM bursts on the live hardware.
 
 Pick OFDM settings in send_ofdm_symbol.yml, then run this to transmit one clean OFDM symbol
 at a time and plot the sent vs received constellations.
@@ -43,9 +43,9 @@ if __name__ == "__main__":
 
         dc_offset_A = float(cfg.DC_OFFSETS[0])
         assert dc_offset_A < 0.4, f"DC offset {dc_offset_A} A exceeds safe range for the LED driver"
-        min_freq    = float(cfg.F_MINS[0])
-        max_freq    = float(cfg.F_MAXS[0])
-        osc_fs      = float(cfg.OSC_SAMPLE_RATES[0])
+        min_freq = float(cfg.F_MINS[0])
+        max_freq = float(cfg.F_MAXS[0])
+        osc_fs = float(cfg.OSC_SAMPLE_RATES[0])
         subcarrier_spacing = float(cfg.SUBCARRIER_SPACING)
         constellation = get_constellation(getattr(cfg, "CONSTELLATION", "qpsk"))
 
@@ -100,13 +100,13 @@ if __name__ == "__main__":
         def plot_constellations(x):
             """Sent vs received constellations; the received panel overlays the original
             sent symbols as red x's so each received point can be compared to its target."""
-            sent  = np.asarray(x.artifact_container['sent_symbols'])
-            recv  = np.asarray(x.artifact_container['received_symbols'])
+            sent = np.asarray(x.artifact_container['sent_symbols'])
+            received = np.asarray(x.artifact_container['received_symbols'])
             freqs = np.asarray(x.artifact_container['subcarrier_freqs_hz'])
             fig, (ax_sent, ax_recv) = plt.subplots(1, 2, figsize=(11, 5))
             ax_sent.scatter(sent.real, sent.imag, s=10, c=freqs, cmap='viridis')
             ax_sent.set_title('Sent')
-            sc = ax_recv.scatter(recv.real, recv.imag, s=10, c=freqs, cmap='viridis')
+            sc = ax_recv.scatter(received.real, received.imag, s=10, c=freqs, cmap='viridis')
             ax_recv.scatter(sent.real, sent.imag, marker='x', c='red', s=40,
                             linewidths=1.2, label='Sent (reference)')
             ax_recv.set_title('Received')

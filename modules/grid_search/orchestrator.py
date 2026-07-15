@@ -9,7 +9,7 @@ Layout produced under data/experiments/<name>_<timestamp>/:
     runs/<run_id>/
         config.yaml          this run's resolved params
         model.pt              checkpoint (adapter.save)
-        metrics.json          eval metrics (rrmse_pct + val_rrmse_pct) + num_params + train_seconds
+        metrics.json          eval metrics (per_burst_rrmse_pct + val_per_burst_rrmse_pct) + num_params + train_seconds
         history.csv          per-epoch train/val loss (omitted for closed-form models)
         plots/loss.png       train vs validation loss curve (trainable models only)
     summary/leaderboard.csv  aggregated view of runs.jsonl
@@ -19,10 +19,11 @@ present) is skipped on re-run -> crash-resumable for free. See base.py for the
 shared run-folder bookkeeping reused by EncoderDecoderGridSearch.
 
 VAL_FRACTION (grid-wide) holds out a random slice of frames for validation;
-channel models are then selected on val_rrmse_pct (see select_channel_models).
+channel models are then selected on val_per_burst_rrmse_pct (see select_channel_models).
 SELECTED_RUN_IDS can pin exactly which runs advance to the encoder/decoder stage.
 '''
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -31,12 +32,13 @@ import yaml
 from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
-from modules.utils import calculate_rrmse_pct_loss, load_ofdm_dataset
+from modules.utils import calculate_per_burst_rrmse_pct_loss, load_ofdm_dataset
 
 
 class ChannelModelGridSearch(GridSearchBase):
     # keys consumed by the orchestrator itself, not forwarded to adapters as shared
-    _ORCHESTRATOR_KEYS = ("models", "VAL_FRACTION", "SELECTED_RUN_IDS")
+    _ORCHESTRATOR_KEYS = ("models", "VAL_FRACTION", "SELECTED_RUN_IDS",
+                          "SELECTION_MODE", "PROB_SELECTION_KEY")
 
     def __init__(self,
                  grid_config: dict,
@@ -123,7 +125,7 @@ class ChannelModelGridSearch(GridSearchBase):
         if getattr(adapter, "exclude_warmup", False):
             s = adapter._warmup_slice(y_pred.shape[-1])
             y_pred, Y = y_pred[..., s:], Y[..., s:]
-        return {"rrmse_pct": calculate_rrmse_pct_loss(Y, y_pred)}
+        return {"per_burst_rrmse_pct": calculate_per_burst_rrmse_pct_loss(Y, y_pred)}
 
     # ----------------------------------------------------------------- run
     def _run_point(self, point, run_dir, context) -> dict:
@@ -134,8 +136,8 @@ class ChannelModelGridSearch(GridSearchBase):
         history = adapter.fit(X, Y, X_val, Y_val)
         metrics = self._evaluate(adapter, X, Y)
         if X_val is not None:
-            # selection metric: held-out validation rRMSE (see select_channel_models)
-            metrics["val_rrmse_pct"] = self._evaluate(adapter, X_val, Y_val)["rrmse_pct"]
+            # selection metric: held-out validation per-burst rRMSE (see select_channel_models)
+            metrics["val_per_burst_rrmse_pct"] = self._evaluate(adapter, X_val, Y_val)["per_burst_rrmse_pct"]
             # probabilistic (learn_noise) models also report validation NLL
             val_nll = adapter.val_nll(X_val, Y_val)
             if val_nll is not None:
@@ -160,20 +162,42 @@ class ChannelModelGridSearch(GridSearchBase):
         return metrics
 
 
-def select_channel_models(exp_dir, mode="best", metric="val_rrmse_pct", run_ids=None):
+def select_channel_models(exp_dir, mode="best", metric="val_per_burst_rrmse_pct",
+                          prob_metric="val_per_burst_rrmse_pct", run_ids=None):
     '''Pick channel models out of a finished ChannelModelGridSearch run for the
     encoder/decoder stage.
 
     run_ids: optional explicit list of run_ids to forward (config-level override);
         when given, exactly those runs are returned and `mode` is ignored.
-    mode="best": the lowest-`metric` run per model family (default metric is the
-        held-out validation rRMSE, falling back to train rRMSE when no validation
-        split was used). mode="all": every finished run.'''
+    prob_metric: the ranking key for probabilistic (learn_noise) runs, e.g.
+        "val_per_burst_rrmse_pct" (mean-prediction accuracy) or "val_nll"
+        (likelihood); falls back through the legacy rRMSE keys if absent.
+        Nonprob runs always rank on `metric`.
+    mode="best": the best run per channel form (model family split into
+        prob/nonprob, e.g. "prob TCN" vs "nonprob TCN"), all ranked by held-out
+        validation per-burst rRMSE (mean-prediction accuracy, which is what the
+        E/D stage consumes), falling back through the legacy globally-normalized
+        keys and then train rRMSE for experiments predating either the metric
+        switch or a validation split.
+    mode="best_per_size": like "best" but per (form, octave size bucket)
+        round(log2(num_params)), so one winner per factor-of-2 parameter tier
+        advances per form (the size-sweep selection; nuisance dims like
+        distribution/beta within a tier collapse to their best).
+    mode="all": every finished run.'''
     exp_dir = Path(exp_dir)
     rows = [json.loads(line) for line in (exp_dir / "runs.jsonl").read_text().splitlines() if line.strip()]
 
     def score(row):
-        return row.get(metric, row.get("rrmse_pct"))
+        for key in (metric, "val_rrmse_pct", "per_burst_rrmse_pct", "rrmse_pct"):
+            if row.get(key) is not None:
+                return row[key]
+        return float("inf")
+
+    def prob_score(row):
+        for key in (prob_metric, "val_per_burst_rrmse_pct", "val_rrmse_pct", "per_burst_rrmse_pct", "rrmse_pct"):
+            if row.get(key) is not None:
+                return row[key]
+        return float("inf")
 
     if run_ids:
         by_id = {row["run_id"]: row for row in rows}
@@ -181,15 +205,20 @@ def select_channel_models(exp_dir, mode="best", metric="val_rrmse_pct", run_ids=
         if missing:
             raise ValueError(f"run_ids not found in {exp_dir}: {missing}")
         rows = [by_id[rid] for rid in run_ids]
-    elif mode == "best":
+    elif mode in ("best", "best_per_size"):
         best = {}
         for row in rows:
-            cur = best.get(row["model"])
-            if cur is None or score(row) < score(cur):
-                best[row["model"]] = row
+            is_prob = row.get("distribution", "none") not in (None, "none")
+            key = (row["model"], "prob" if is_prob else "nonprob")
+            if mode == "best_per_size":
+                key = (*key, int(round(math.log2(row["num_params"]))))
+            rank = prob_score if is_prob else score
+            cur = best.get(key)
+            if cur is None or rank(row) < rank(cur):
+                best[key] = row
         rows = list(best.values())
     elif mode != "all":
-        raise ValueError(f"unknown mode {mode!r}, expected 'all' or 'best'")
+        raise ValueError(f"unknown mode {mode!r}, expected 'all', 'best' or 'best_per_size'")
 
     selected = []
     for row in rows:

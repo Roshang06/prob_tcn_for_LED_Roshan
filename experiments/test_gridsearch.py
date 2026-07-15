@@ -1,6 +1,6 @@
 '''
 Synthetic end-to-end test of the channel model and encoder/decoder grid searches.
-No hardware, no zarr dataset — all data is generated here.
+No hardware, no zarr dataset - all data is generated here.
 
 Run from the repo root:
     python experiments/test_gridsearch.py
@@ -58,12 +58,12 @@ class _CaptureStub(FunctionalBlock):
         x.data = np.concatenate([np.zeros(64), received, np.zeros(64)])
         return x
 
-# ── Experiment output ────────────────────────────────────────────────────────
+# Experiment output
 EXP_DIR   = Path("data/experiments/test_gridsearch")
 DEVICE    = "cpu"
 SEED      = 42
 
-# ── Synthetic OFDM geometry ──────────────────────────────────────────────────
+# Synthetic OFDM geometry
 K_MIN            = 30
 K_MAX            = 100
 SUBCARRIER_SPACING_HZ = 10e3
@@ -182,7 +182,7 @@ if __name__ == "__main__":
         experiment_name="channel_models",
     )
     channel_exp_dir = channel_gs.run(data=(X, Y))
-    print(f"\nChannel grid done → {channel_exp_dir}")
+    print(f"\nChannel grid done -> {channel_exp_dir}")
 
     print("\n" + "=" * 60)
     print("Stage 2: select channel models (best per architecture, by val loss)")
@@ -213,7 +213,7 @@ if __name__ == "__main__":
         preamble_length=ofdm_modulator.preamble_length,
     )
     ed_exp_dir = ed_gs.run(ofdm_config=OFDM_CONFIG)
-    print(f"\nEncoder/decoder grid done → {ed_exp_dir}")
+    print(f"\nEncoder/decoder grid done -> {ed_exp_dir}")
 
     print("\n" + "=" * 60)
     print("Stage 4: select encoder/decoders for validation")
@@ -250,7 +250,7 @@ if __name__ == "__main__":
         device=DEVICE, seed=SEED, experiments_dir=EXP_DIR, experiment_name="ed_validation",
     )
     val_exp_dir = validation.run()
-    print(f"\nValidation done → {val_exp_dir}")
+    print(f"\nValidation done -> {val_exp_dir}")
 
     print("\n" + "=" * 60)
     print("Results summary")
@@ -261,7 +261,8 @@ if __name__ == "__main__":
                                ("validation", val_exp_dir)]:
         lb = Path(summary_dir) / "summary" / "leaderboard.csv"
         rows = list(csv.DictReader(open(lb)))
-        metric = "evm_pct" if rows and "evm_pct" in rows[0] else "rrmse_pct"  # channel ranks by rrmse, E/D by EVM
+        metric = next((m for m in ("evm_pct", "per_burst_rrmse_pct", "rrmse_pct")
+                       if rows and m in rows[0]), "per_burst_rrmse_pct")  # channel ranks by rrmse, E/D by EVM
         print(f"\n  {label} leaderboard (sorted by {metric}):")
         for row in sorted(rows, key=lambda r: float(r[metric])):
             extra = f"  ber={float(row['ber']):.4f}" if row.get("ber") else ""
