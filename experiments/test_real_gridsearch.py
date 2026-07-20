@@ -3,7 +3,7 @@ Synthetic end-to-end test of the channel model and encoder/decoder grid searches
 No hardware, no zarr dataset — all data is generated here.  
 
 Run from the repo root:
-    python experiments/test_gridsearch.py
+    python experiments/test_real_gridsearch.py
 '''
 import csv
 import os
@@ -55,29 +55,6 @@ ofdm_modulator = ModulateDataOFDM(
 
 OFDM_CONFIG = OFDMConfig.from_modulator(ofdm_modulator)
 
-
-def make_synthetic_dataset(n_frames: int = 64) -> tuple[torch.Tensor, torch.Tensor]:
-    '''Generate random QPSK frames in the time domain and pass them through a
-    synthetic channel (short FIR + additive noise) to produce (X_sent, Y_received).'''
-    torch.manual_seed(SEED)
-
-    sent_time_frames = []
-    for _ in range(n_frames):
-        x = Signal(data=np.zeros(1), sampling_rate=ofdm_modulator.fs_out)
-        x = ofdm_modulator.run(x)
-        sent_time_frames.append(torch.from_numpy(x.artifact_container["sent_baseband"]))
-        
-
-    sent_time = torch.stack(sent_time_frames).float()
-
-    fir = torch.tensor([[[0.8, 0.3, -0.1]]], dtype=torch.float32)
-    fir = torch.flip(fir, dims=[-1]) # this was added because F.conv1d is a cross correlation, not a convolution
-
-    recv_time = F.conv1d(sent_time.unsqueeze(1), fir, padding=2).squeeze(1)[:, :sent_time.shape[1]]
-    recv_time = recv_time + 0.02 * torch.randn_like(recv_time)
-
-    return sent_time, recv_time
-
 def read_dataset(n_frames: int = 64) -> tuple[torch.Tensor, torch.Tensor]:
     sent_arr = zarr.open("data\dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr\sent_burst", mode='r')
     recieved_arr = zarr.open("data\dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr\\received_burst", mode='r')
@@ -100,11 +77,11 @@ CHANNEL_GRID = {
         {
             "model": "tcn",
             "params": {
-                "nlayers":          [2, 3],
+                "nlayers":          [3],
                 "dilation_base":    2,
                 "kernel_size":         5,
-                "hidden_channels":  [8, 16],
-                "learn_noise":      False,
+                "hidden_channels":  [16],
+                "learn_noise":      True,
                 "gaussian":         True,
                 "epochs":           100,
                 "lr":               1e-3,
@@ -114,27 +91,11 @@ CHANNEL_GRID = {
         {
             "model": "gmp",
             "params": {
-                "memory_linear":       [4, 8],
-                "memory_nonlinear":    4,
+                "memory_linear":       [10],
+                "memory_nonlinear":    10,
                 "nonlinearity_order":  3,
                 "cross_term_depth":    [0, 1],
                 "ridge":               1e-3,
-            },
-        },
-        {
-            "model": "lru",
-            "params": {
-                "state_dim":        [4, 8],
-                "hidden_dim":       8,
-                "n_layers":         2,
-                "dropout":          0.0,
-                "distribution":     "none",
-                "epochs":           100,
-                "lr":               1e-3,
-                "batch_size":       16,
-                "factor":           0.5,
-                "patience":         5,
-                "min_lr":           1e-6,
             },
         },
     ]
@@ -143,12 +104,13 @@ CHANNEL_GRID = {
 ENCODER_DECODER_GRID = {
     "constellation":      "qpsk",
     "preamble_amplitude": 3.0,
+    "Mix-Match_Archs": True,
     "params": {
         "nlayers":         [2, 3],
         "dilation_base":   2,
         "kernel_size":     5,
         "hidden_channels": [4, 8],
-        "epochs":          500,
+        "epochs":          1000,
         "lr":              1e-3,
         "weight_decay":    1e-5,
         "batch_size":      8,
@@ -163,11 +125,11 @@ if __name__ == "__main__":
     print("=" * 60)
 
     X, Y = read_dataset(n_frames=5000)
-    print(f"Synthetic dataset: X{tuple(X.shape)}  Y{tuple(Y.shape)}")
+    print(f"Real dataset: X{tuple(X.shape)}  Y{tuple(Y.shape)}")
 
     channel_gs = ChannelModelGridSearch(
         CHANNEL_GRID,
-        dataset_path="synthetic", 
+        dataset_path="real", 
         experiments_dir=EXP_DIR,
         device=DEVICE,
         seed=SEED,

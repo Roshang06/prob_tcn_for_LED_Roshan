@@ -60,7 +60,7 @@ class _CaptureStub(FunctionalBlock):
 
 # ── Experiment output ────────────────────────────────────────────────────────
 EXP_DIR   = Path("data/experiments/test_gridsearch")
-DEVICE    = "cpu"
+DEVICE    = "cuda"
 SEED      = 42
 
 # ── Synthetic OFDM geometry ──────────────────────────────────────────────────
@@ -97,12 +97,7 @@ def make_synthetic_dataset(n_frames: int = 64) -> tuple[torch.Tensor, torch.Tens
         
 
     sent_time = torch.stack(sent_time_frames).float()
-
-    fir = torch.tensor([[[0.8, 0.3, -0.1]]], dtype=torch.float32)
-    fir = torch.flip(fir, dims=[-1]) # this was added because F.conv1d is a cross correlation, not a convolution
-
-    recv_time = F.conv1d(sent_time.unsqueeze(1), fir, padding=2).squeeze(1)[:, :sent_time.shape[1]]
-    recv_time = recv_time + 0.02 * torch.randn_like(recv_time)
+    recv_time = fir_channel(sent_time)
 
     return sent_time, recv_time
 
@@ -116,7 +111,7 @@ CHANNEL_GRID = {
                 "dilation_base":    2,
                 "kernel_size":      10,
                 "hidden_channels":  [8, 16],
-                "learn_noise":      False,
+                "learn_noise":      True,
                 "gaussian":         True,
                 "epochs":           100,
                 "lr":               1e-3,
@@ -159,7 +154,7 @@ ENCODER_DECODER_GRID = {
     "constellation":      "qpsk",
     "preamble_amplitude": 3.0,
     "params": {
-        "nlayers":         [2],
+        "nlayers":         [2, 3],
         "dilation_base":   2,
         "kernel_size":     10,
         "hidden_channels": [4, 8],

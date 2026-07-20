@@ -47,9 +47,11 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self.preamble_amplitude = float(grid_config["preamble_amplitude"])
         self.clip_threshold = float(clip_threshold)
         self.preamble_length = preamble_length
+        self.mix = grid_config["Mix-Match_Archs"]
 
         ed_points = expand_grid([{"model": "tcn_ae", "params": grid_config["params"]}])
-        points = [{**p, "channel_run_id": run_id} for p in ed_points for run_id in self.channel_models]
+        points = [{**p, "channel_run_id": run_id} for p in ed_points for run_id in self.channel_models] if not self.mix else [{**p, "decoder": {**d},  "channel_run_id": run_id} for p in ed_points for d in ed_points for run_id in self.channel_models]
+
         shared_params = {k: v for k, v in grid_config.items() if k != "params"}
         super().__init__(points, grid_config, shared_params, experiments_dir, device, seed,
                           experiment_name, run_prefix=run_prefix, extra_manifest={
@@ -170,52 +172,6 @@ class EncoderDecoderGridSearch(GridSearchBase):
             encoder.train(); decoder.train()
         ber = calculate_BER(recv_freq.flatten(), true_bits.flatten(), constellation=self.constellation)
         return {"ber": ber, "rrmse_pct": calculate_rrmse_pct_loss(sent_freq, recv_freq)}
-    
-    def _plot_delay_correlation(self, run_dir, sent_time, decoded_time, lag_max=40):
-        '''Cross-correlation between sent and decoded time signals. A causal
-        encoder/decoder/channel chain will show its peak at a positive lag,
-        not lag 0 — that offset is the group delay in_band_time_loss never
-        corrects for.'''
-        with torch.no_grad():
-            corr = correlation(sent_time, decoded_time, lag_max).squeeze(-1).cpu().numpy()
-        lags = np.arange(-lag_max, lag_max + 1)
-        peak_lag = int(lags[np.argmax(np.abs(corr))])
-
-        fig = Figure(figsize=(7, 4))
-        ax = fig.subplots()
-        ax.plot(lags, corr, marker=".", ms=3)
-        ax.axvline(0, color="gray", lw=1, ls="--")
-        ax.axvline(peak_lag, color="r", lw=1, ls="--", label=f"peak lag={peak_lag}")
-        ax.set_xlabel("lag (samples)")
-        ax.set_ylabel("normalized correlation")
-        ax.set_title(f"{run_dir.name} — sent/decoded cross-correlation")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
-        fig.savefig(run_dir / "plots" / "delay_correlation.png", dpi=120)
-        return peak_lag
-
-    def _plot_position_error(self, run_dir, sent_time, decoded_time, cp_len):
-        '''Per-timestep squared error, aligned to the CP boundary. If error is
-        concentrated in the first N samples after the CP, that's boundary
-        zero-padding contamination bleeding past the guard interval — not a
-        global reconstruction quality issue.'''
-        with torch.no_grad():
-            err = (sent_time - decoded_time).pow(2).mean(dim=0).cpu().numpy()  # [T]
-
-        fig = Figure(figsize=(8, 4))
-        ax = fig.subplots()
-        ax.plot(err)
-        ax.axvline(cp_len, color="r", lw=1, ls="--", label="CP boundary (scoring starts here)")
-        ax.set_xlabel("time index (0 = start of CP)")
-        ax.set_ylabel("mean squared error")
-        ax.set_title(f"{run_dir.name} — error vs position in frame")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
-        fig.savefig(run_dir / "plots" / "position_error.png", dpi=120)
 
     def _run_point(self, point, run_dir, context) -> dict:
         ofdm_config, channel_models = context
@@ -224,7 +180,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
 
         arch = {k: p[k] for k in ARCH_KEYS}
         encoder = TCN(**arch).to(self.device)
-        decoder = TCN(**arch).to(self.device)
+        decoder = TCN(**arch).to(self.device) if not self.mix else TCN(**{k: point["decoder"]["params"][k] for k in ARCH_KEYS}).to(self.device)
         optimizer = optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()),
                                  lr=float(p["lr"]),
                                  weight_decay=float(p.get("weight_decay", 0.0)))
@@ -268,6 +224,9 @@ class EncoderDecoderGridSearch(GridSearchBase):
         metrics = self._evaluate(encoder, decoder, channel_model, ofdm_config, num_bits, batch_size)
         metrics["num_params"] = encoder.get_num_params() + decoder.get_num_params()
         metrics["channel_run_id"] = point["channel_run_id"]
+        metrics["encoder"] = p
+        if self.mix:
+            metrics["decoder"] = point["decoder"]["params"]
 
         # propagate channel model metadata
         ch_meta = self.channel_models[point["channel_run_id"]]
@@ -286,7 +245,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz,
                                  channel_id=point["channel_run_id"], channel_type=ch_model_type, evm=evm)
         self._plot_delay_correlation(run_dir, eval_sent_time, decoded_time_eval)
-        self._plot_position_error(run_dir, eval_sent_time, decoded_time_eval, ofdm_config.cyclic_prefix_length)
+        self._plot_position_error(run_dir, eval_sent_time[:, self.preamble_length:], decoded_time_eval[:, self.preamble_length:], ofdm_config.cyclic_prefix_length)
         return metrics
 
     # ------------------------------------------------------------------- plots
@@ -343,3 +302,49 @@ class EncoderDecoderGridSearch(GridSearchBase):
         fig.suptitle(run_dir.name)
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
         fig.savefig(run_dir / "plots" / "constellation.png", dpi=120)
+
+    def _plot_delay_correlation(self, run_dir, sent_time, decoded_time, lag_max=40):
+        '''Cross-correlation between sent and decoded time signals. A causal
+        encoder/decoder/channel chain will show its peak at a positive lag,
+        not lag 0 — that offset is the group delay in_band_time_loss never
+        corrects for.'''
+        with torch.no_grad():
+            corr = correlation(sent_time, decoded_time, lag_max).squeeze(-1).cpu().numpy()
+        lags = np.arange(-lag_max, lag_max + 1)
+        peak_lag = int(lags[np.argmax(np.abs(corr))])
+
+        fig = Figure(figsize=(7, 4))
+        ax = fig.subplots()
+        ax.plot(lags, corr, marker=".", ms=3)
+        ax.axvline(0, color="gray", lw=1, ls="--")
+        ax.axvline(peak_lag, color="r", lw=1, ls="--", label=f"peak lag={peak_lag}")
+        ax.set_xlabel("lag (samples)")
+        ax.set_ylabel("normalized correlation")
+        ax.set_title(f"{run_dir.name} — sent/decoded cross-correlation")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        fig.savefig(run_dir / "plots" / "delay_correlation.png", dpi=120)
+        return peak_lag
+
+    def _plot_position_error(self, run_dir, sent_time, decoded_time, cp_len):
+        '''Per-timestep squared error, aligned to the CP boundary. If error is
+        concentrated in the first N samples after the CP, that's boundary
+        zero-padding contamination bleeding past the guard interval — not a
+        global reconstruction quality issue.'''
+        with torch.no_grad():
+            err = (sent_time - decoded_time).pow(2).mean(dim=0).cpu().numpy()  # [T]
+
+        fig = Figure(figsize=(8, 4))
+        ax = fig.subplots()
+        ax.plot(err)
+        ax.axvline(cp_len, color="r", lw=1, ls="--", label="CP boundary (scoring starts here)")
+        ax.set_xlabel("time index (0 = start of CP)")
+        ax.set_ylabel("mean squared error")
+        ax.set_title(f"{run_dir.name} — error vs position in frame")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        fig.savefig(run_dir / "plots" / "position_error.png", dpi=120)
