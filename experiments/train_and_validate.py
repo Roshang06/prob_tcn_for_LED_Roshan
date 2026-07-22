@@ -1,5 +1,5 @@
 '''
-train_and_validate.py — full single-DC-offset pipeline on the real hardware.
+Full single-DC-offset pipeline on the real hardware.
 
   1. gather OFDM data into a zarr dataset (or toggle to reuse an existing one)
   2. channel-model grid search on that dataset
@@ -12,6 +12,8 @@ Combines end_to_end_experiment.py (real data collection) with the grid-search /
 validation flow exercised synthetically in test_gridsearch.py.
 '''
 import csv
+import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +26,7 @@ from modules.grid_search import (
     ChannelModelGridSearch, EncoderDecoderGridSearch, select_channel_models,
     select_encoder_decoders, EncoderDecoderValidation,
 )
-from modules.grid_search.base import generate_run_name
+from modules.grid_search.base import generate_run_name, format_duration
 from modules.utils import OFDMConfig
 
 HERE = Path(__file__).resolve().parent
@@ -34,7 +36,8 @@ EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
 
 SELECTED_CHANNEL_RUN_IDS = None  # None -> best per family; or ["tcn_xxxx", ...]
 SELECTED_ED_RUN_IDS = None       # None -> all E/D runs; or ["tcn_ae_xxxx", ...]
-VALIDATION_TRIALS = 20
+VALIDATION_TRIALS = 40
+MAX_SYNC_RETRIES = 3             # re-collect a capture this many times if sync_outlier is flagged
 
 MEASURED_A_OFFSET = 0.000
 
@@ -67,9 +70,9 @@ if __name__ == "__main__":
         # single DC offset per dataset (see AppendToDataset)
         dc_offset_A = float(cfg.DC_OFFSETS[0])
         assert dc_offset_A < 0.4, f"DC offset {dc_offset_A} A exceeds safe range for the LED driver"
-        min_freq    = float(cfg.F_MINS[0])
-        max_freq    = float(cfg.F_MAXS[0])
-        osc_fs      = float(cfg.OSC_SAMPLE_RATES[0])
+        min_freq = float(cfg.F_MINS[0])
+        max_freq = float(cfg.F_MAXS[0])
+        osc_fs = float(cfg.OSC_SAMPLE_RATES[0])
         subcarrier_spacing = float(cfg.SUBCARRIER_SPACING)
 
         pwr_supply.set_6V(voltage=4, current=dc_offset_A)  # current-limited; never reaches 4 V
@@ -103,6 +106,8 @@ if __name__ == "__main__":
             input_signal_frequency=f_AWG, trigger_channel=1, data_channel=3, debug=False)
         resample_waveform = ResampleMeasuredWaveform(
             fs_in=osc_fs, fs_out=mod_ofdm.baseband_sampling_rate, debug=False)
+        fractional_sync = FractionalSync(
+            fs=mod_ofdm.baseband_sampling_rate, f_min=min_freq, f_max=max_freq, debug=False)
         demod_ofdm = DemodulateDataOFDM(
             constellation=get_constellation(cfg.MODULATION_FORMAT),
             f_min=min_freq, f_max=max_freq, subcarrier_spacing=subcarrier_spacing,
@@ -128,15 +133,46 @@ if __name__ == "__main__":
                 active_carrier_indices=mod_ofdm.subcarrier_indicies,
                 cyclic_prefix_length=mod_ofdm.cyclic_prefix_length,
                 preamble_length=mod_ofdm.preamble_length,
-                modulation_format=cfg.MODULATION_FORMAT, dataset_path=None)
+                modulation_format=cfg.MODULATION_FORMAT, dataset_path=None,
+                run_name=RUN_NAME,
+                power_min=getattr(cfg, 'POWER_MIN', None),
+                power_max=getattr(cfg, 'POWER_MAX', None),
+                jitter_power=getattr(cfg, 'JITTER_POWER', None),
+                clip_threshold=getattr(cfg, 'CLIP_THRESHOLD', None))
             dataset_path = append_to_dataset.dataset_path
             send_and_receive = SendAndReceiveOFDM(
-                mod_ofdm, send_waveform, measure_waveform, resample_waveform, demod_ofdm)
+                mod_ofdm, send_waveform, measure_waveform, resample_waveform, demod_ofdm,
+                fractional_sync_block=fractional_sync)
+            collection_start = time.time()
+            sync_outliers = 0
             for i in range(cfg.N):
-                x = send_and_receive.run(Signal(data=np.zeros(1), sampling_rate=mod_ofdm.fs_out))
+                point_start = time.time()
+
+                for attempt in range(MAX_SYNC_RETRIES + 1):
+                    x = send_and_receive.run(Signal(data=np.zeros(1), sampling_rate=mod_ofdm.fs_out))
+                    if not x.artifact_container.get("sync_outlier"):
+                        break
+                    sync_outliers += 1
+                    residual = x.artifact_container["residual_delay_samples"]
+                    retries_left = MAX_SYNC_RETRIES - attempt
+                    if retries_left > 0:
+                        Exp.log(f"sync outlier on point {i + 1} (residual {residual:+.3f} samples), "
+                                f"re-collecting ({retries_left} left)")
+                else:
+                    Exp.log(f"sync retries exhausted on point {i + 1} (residual {residual:+.3f}), "
+                            f"passing over this point")
+                    continue
+
                 x = append_to_dataset.run(x)
-                Exp.log(f"gathered {i + 1}/{cfg.N}  frame={x.data.shape}")
+                point_seconds = time.time() - point_start
+                elapsed = time.time() - collection_start
+                eta = elapsed / (i + 1) * (cfg.N - i - 1)
+                Exp.log(f"gathered {i + 1}/{cfg.N}  frame={x.data.shape}  "
+                        f"{format_duration(point_seconds)}  "
+                        f"[elapsed {format_duration(elapsed)}, eta {format_duration(eta)}]")
             Exp.log(f"dataset saved to {dataset_path}")
+            if sync_outliers:
+                Exp.log(f"sync outliers detected and re-collected during collection: {sync_outliers}")
         else:
             Exp.log(f"reusing existing dataset at {dataset_path}")
 
@@ -153,9 +189,15 @@ if __name__ == "__main__":
                 dataset_path=dataset_path, run_prefix=RUN_NAME)
             channel_exp_dir = channel_gs.run()
 
-        # 3. select channel models
+        # 3. select channel models: SELECTION_MODE picks "all" (size sweep),
+        # "best" (one winner per channel form) or "best_per_size"; PROB_SELECTION_KEY
+        # sets the ranking metric for probabilistic runs (both from the config)
+        channel_gs_config = Exp.config.CHANNEL_GRID_SEARCH
+        selection_mode = getattr(channel_gs_config, "SELECTION_MODE")
+        prob_selection_key = getattr(channel_gs_config, "PROB_SELECTION_KEY")
         best_channels = select_channel_models(
-            channel_exp_dir, mode="all", run_ids=SELECTED_CHANNEL_RUN_IDS)
+            channel_exp_dir, mode=selection_mode, prob_metric=prob_selection_key,
+            run_ids=SELECTED_CHANNEL_RUN_IDS)
         for cm in best_channels:
             dist = cm["params"].get("distribution", "none")
             print(f"  channel {cm['model']:4s}  dist={dist:12s}  run={cm['run_id']}")
@@ -172,9 +214,13 @@ if __name__ == "__main__":
                 dataset_path=dataset_path, run_prefix=RUN_NAME)
             ed_exp_dir = ed_gs.run(ofdm_config=OFDMConfig.from_modulator(mod_ofdm))
 
-        # 5. select E/D models and validate on the live channel
+        # 5. select E/D models and validate on the live channel. Validation order is
+        # shuffled (seeded) so slow channel drift over a multi-hour sweep does not
+        # correlate with grid order (e.g. model size); resume stays safe because
+        # finished runs are skipped by run_id.
         ed_models = select_encoder_decoders(
             ed_exp_dir, channel_exp_dir=channel_exp_dir, run_ids=SELECTED_ED_RUN_IDS)
+        random.Random(seed).shuffle(ed_models)
         for m in ed_models:
             print(f"  E/D {m['run_id']}  channel_form={m['channel_form']}")
 
@@ -207,10 +253,12 @@ if __name__ == "__main__":
 
         validation = EncoderDecoderValidation(
             ed_models,
-            (mod_ofdm_val, send_waveform, measure_waveform, resample_waveform, demod_ofdm_val),
+            (mod_ofdm_val, send_waveform, measure_waveform, resample_waveform,
+             fractional_sync, demod_ofdm_val),
             num_trials=VALIDATION_TRIALS,
             constellation=val_constellation,
             clip_value=float(cfg.CLIP_THRESHOLD),
+            noise_floor_points=int(getattr(Exp.config.ENCODER_DECODER_VALIDATION, "NOISE_FLOOR_POINTS", 0)),
             device=device, seed=seed, experiments_dir=EXP_DIR, experiment_name="ed_validation",
             run_prefix=RUN_NAME, debug=False)
         val_exp_dir = validation.run()
@@ -224,7 +272,8 @@ if __name__ == "__main__":
                                    ("validation", val_exp_dir)]:
             lb = Path(summary_dir) / "summary" / "leaderboard.csv"
             rows = list(csv.DictReader(open(lb)))
-            metric = "evm_pct" if rows and "evm_pct" in rows[0] else ("evm" if rows and "evm" in rows[0] else "rrmse_pct")
+            metric = next((m for m in ("evm_pct", "evm", "per_burst_rrmse_pct", "rrmse_pct")
+                           if rows and m in rows[0]), "per_burst_rrmse_pct")
             print(f"\n  {label} leaderboard (sorted by {metric}):")
             for row in sorted(rows, key=lambda r: float(r[metric])):
                 extra = f"  ber={float(row['ber']):.4f}" if row.get("ber") else ""

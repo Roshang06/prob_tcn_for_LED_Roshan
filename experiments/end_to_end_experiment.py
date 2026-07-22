@@ -11,6 +11,7 @@ gathering final performance metrics on the original channel.
 import os
 import time
 from pathlib import Path
+from modules.grid_search.base import format_duration
 from pyflux.core.experiment import ExperimentalContext
 from pyflux.core.block import Signal, ActionBlock, FunctionalBlock, ResamplingBlock
 from pyflux.core.chain import Chain
@@ -156,7 +157,11 @@ if __name__ == '__main__':
                 cyclic_prefix_length=mod_ofdm.cyclic_prefix_length,
                 preamble_length=preamble_length,
                 modulation_format=modulation_format,
-                dataset_path=dataset_path
+                dataset_path=dataset_path,
+                power_min=getattr(cfg, 'POWER_MIN', None),
+                power_max=getattr(cfg, 'POWER_MAX', None),
+                jitter_power=getattr(cfg, 'JITTER_POWER', None),
+                clip_threshold=getattr(cfg, 'CLIP_THRESHOLD', None)
             )
 
             send_and_receive_ofdm = SendAndReceiveOFDM(mod_ofdm,
@@ -168,11 +173,18 @@ if __name__ == '__main__':
 
 
             # Build dataset
+            collection_start = time.time()
             for i in range(num_samples_gathered):
+                point_start = time.time()
                 seed = Signal(data=np.zeros(1), sampling_rate=mod_ofdm.fs_out)
                 x = send_and_receive_ofdm.run(seed)
                 x = append_to_dataset.run(x)
-                Exp.log(f"Shape of received symbol frame: {x.data.shape}, sampling rate: {x.sampling_rate: .2f} Hz")
+                point_seconds = time.time() - point_start
+                elapsed = time.time() - collection_start
+                eta = elapsed / (i + 1) * (num_samples_gathered - i - 1)
+                Exp.log(f"gathered {i + 1}/{num_samples_gathered}  frame={x.data.shape}  "
+                        f"{format_duration(point_seconds)}  "
+                        f"[elapsed {format_duration(elapsed)}, eta {format_duration(eta)}]")
                 PlotConstellations().run(x)
 
                 # Plot waveform

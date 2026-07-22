@@ -137,7 +137,7 @@ class ModulateDataOFDM(FunctionalBlock):
         if self.power_min is not None and self.power_max is not None:
             rms = np.sqrt(np.mean(time_domain_signal ** 2)) + 1e-12
             target_power = np.random.uniform(self.power_min, self.power_max)
-            time_domain_signal = time_domain_signal / rms * np.sqrt(target_power)
+            time_domain_signal = (time_domain_signal / rms) * np.sqrt(target_power)
 
         cyclic_prefix = time_domain_signal[-self.cyclic_prefix_length:]
         time_domain_signal_with_cp = np.concatenate((cyclic_prefix, time_domain_signal))
@@ -194,7 +194,7 @@ class SendWaveform(ActionBlock):
             freq=self.freq,
             amplitude=self.amplitude,
             offset=self.offset)
-        time.sleep(3)
+        time.sleep(2)
         
 class MeasureWaveform(ResamplingBlock):
     def __init__(
@@ -254,6 +254,65 @@ class ResampleMeasuredWaveform(ResamplingBlock):
             print(f"ResampleMeasuredWaveform: resampled from {self.fs_in:.2e} Hz to {self.fs_out:.2e} Hz "
                   f"using up={up}, down={down}, resulting in length change of {original_len} to {len(resampled_data)}samples")
         return x
+
+class FractionalSync(FunctionalBlock):
+    '''
+    Estimate the residual sub-sample timing offset of a capture from the received
+    preamble's phase slope and remove it from the whole record, so every capture lands
+    on the same sample-clock phase before any slicing, decoding, or dataset storage.
+    '''
+
+    def __init__(self, fs, f_min, f_max, outlier_threshold_samples=0.1, debug=False):
+        super().__init__(float(fs))  # read back through the Block.fs property
+        self.f_min = float(f_min)
+        self.f_max = float(f_max)
+        self.outlier_threshold_samples = float(outlier_threshold_samples)
+        self.debug = debug
+
+    def estimate_delay(self, y_t, preamble, start=None):
+        '''Weighted LS fit of angle(R * conj(S)) ~ phi0 - 2*pi*f*tau over the in-band
+        preamble bins. When start is None the integer alignment is found by correlation;
+        pass a fixed start to re-measure the residual on a known window.'''
+        if start is None:
+            corr = correlate(y_t, preamble, mode='valid')
+            start = int(np.argmax(corr))
+        received_preamble = y_t[start:start + len(preamble)]
+
+        S = np.fft.rfft(preamble)
+        R = np.fft.rfft(received_preamble)
+        freqs = np.fft.rfftfreq(len(preamble), d=1.0 / self.fs)
+        band = (freqs >= self.f_min) & (freqs <= self.f_max)
+        theta = np.angle(R[band] * np.conj(S[band]))
+        weights = np.abs(R[band] * S[band])
+        basis = np.column_stack([np.ones(band.sum()), -2 * np.pi * freqs[band]])
+        coeffs, *_ = np.linalg.lstsq(basis * weights[:, None], theta * weights, rcond=None)
+        return coeffs[1], start  # tau in seconds, integer alignment used
+
+    def transform(self, x: Signal) -> Signal:
+        preamble = np.asarray(x.artifact_container['preamble'], dtype=np.float64)
+        y_t = np.asarray(x.data, dtype=np.float64)
+        tau, start = self.estimate_delay(y_t, preamble)
+
+        freqs_full = np.fft.rfftfreq(len(y_t), d=1.0 / self.fs)
+        x.data = np.fft.irfft(np.fft.rfft(y_t) * np.exp(2j * np.pi * freqs_full * tau),
+                              n=len(y_t))
+
+        # self-check: re-fit at the SAME integer window (this block only removes the
+        # sub-sample delay; the demodulator re-aligns integer offsets separately). Wrap
+        # the residual into [-0.5, 0.5] samples so a benign 1-sample offset reads as ~0
+        # and only a large *fractional* residual (noise-corrupted fit) flags the capture.
+        residual_tau, _ = self.estimate_delay(x.data, preamble, start=start)
+        residual_samples = residual_tau * self.fs
+        fractional_residual = float(residual_samples - np.round(residual_samples))
+
+        x.artifact_container['fractional_delay_samples'] = float(tau * self.fs)
+        x.artifact_container['residual_delay_samples'] = fractional_residual
+        x.artifact_container['sync_outlier'] = abs(fractional_residual) > self.outlier_threshold_samples
+        if self.debug:
+            print(f"FractionalSync: removed {tau * 1e9:.2f} ns "
+                  f"({tau * self.fs:+.3f} samples), residual {fractional_residual:+.3f} samples")
+        return x
+
 
 class DemodulateDataOFDM(FunctionalBlock):
     def __init__(self,
@@ -396,9 +455,14 @@ class SendAndReceiveOFDM(Chain):
                  send_block: SendWaveform,
                  receive_block: MeasureWaveform,
                  resample_block: ResampleMeasuredWaveform,
-                 demodulate_block: DemodulateDataOFDM
+                 demodulate_block: DemodulateDataOFDM,
+                 fractional_sync_block: FractionalSync = None,
                  ):
-        super().__init__([modulate_block, send_block, receive_block, resample_block, demodulate_block])
+        blocks = [modulate_block, send_block, receive_block, resample_block]
+        if fractional_sync_block is not None:
+            blocks.append(fractional_sync_block)
+        blocks.append(demodulate_block)
+        super().__init__(blocks)
 
 
 class ApplyEncoder(FunctionalBlock):
@@ -486,7 +550,12 @@ class AppendToDataset(ActionBlock):
                  preamble_length: int,
                  modulation_format: str,
                  block_size: int = 64,
-                 dataset_path: Path = None):
+                 dataset_path: Path = None,
+                 run_name: str = None,
+                 power_min: float = None,
+                 power_max: float = None,
+                 jitter_power: float = None,
+                 clip_threshold: float = None):
         super().__init__(fs_in)
         self.block_size = block_size
         self._arrays = None
@@ -499,7 +568,8 @@ class AppendToDataset(ActionBlock):
             sweeps_dir = Path(__file__).resolve().parents[1] / "data" / "sweeps"
             sweeps_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-            name = f"dc{dc_offset:g}A_fmin{f_min:g}_fmax{f_max:g}_{timestamp}.zarr"
+            prefix = f"{run_name}_" if run_name else ""
+            name = f"{prefix}dc{dc_offset:g}A_fmin{f_min:g}_fmax{f_max:g}_{timestamp}.zarr"
             self.dataset_path = sweeps_dir / name
             self.group = zarr.open_group(self.dataset_path, mode="w-")
             print(f"[AppendToDataset] created new dataset: {self.dataset_path}")
@@ -513,6 +583,15 @@ class AppendToDataset(ActionBlock):
             "preamble_length": int(preamble_length),
             "modulation_format": str(modulation_format),
         })
+
+        collection_settings = {
+            "power_min": power_min,
+            "power_max": power_max,
+            "jitter_power": jitter_power,
+            "clip_threshold": clip_threshold,
+        }
+        self.group.attrs.update({key: float(value) for key, value in collection_settings.items()
+                                 if value is not None})
 
     @staticmethod
     def _bits_to_array(bits):
@@ -537,6 +616,9 @@ class AppendToDataset(ActionBlock):
             "source_bits": self._bits_to_array(x.artifact_container["source_bits"]),
             "decoded_bits": self._bits_to_array(x.artifact_container["estimated_bits"]),
         }
+        if "fractional_delay_samples" in x.artifact_container:
+            fields["fractional_delay_samples"] = np.asarray(
+                [x.artifact_container["fractional_delay_samples"]], dtype="float32")
         if self._arrays is None:
             self._init_arrays(fields)
         for name, row in fields.items():

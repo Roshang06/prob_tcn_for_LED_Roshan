@@ -69,6 +69,15 @@ def run_id(point: dict) -> str:
     return f"{point['model']}_{digest}"
 
 
+def format_duration(seconds: float) -> str:
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
 class GridSearchBase:
     def __init__(self, points, grid_manifest, shared_params, experiments_dir,
                  device, seed, experiment_name, extra_manifest=None, run_prefix=None):
@@ -129,21 +138,39 @@ class GridSearchBase:
     def _plot_history(self, run_dir: Path, history: dict):
         '''Save a train/validation loss-vs-epoch curve under plots/ for trainable
         models. Closed-form models pass an empty history and are skipped upstream.
-        Uses the OO Figure API so it never switches the global matplotlib backend.'''
-        labels = {"loss": "train", "val_loss": "validation"}
-        series = {k: v for k, v in history.items() if k.endswith("loss")}
+        Probabilistic models also log train_nll (true beta=0 NLL, same scale as
+        val_loss); the beta-NLL training objective then moves to a twin axis since
+        its sigma-dependent scale would flatline next to the true NLL. Uses the OO
+        Figure API so it never switches the global matplotlib backend.'''
+        labels = {"loss": "train", "val_loss": "validation", "train_nll": "train (true NLL)"}
+        series = {k: v for k, v in history.items() if k.endswith("loss") or k == "train_nll"}
         if not series:
             return
         epochs = range(len(next(iter(series.values()))))
         fig = Figure(figsize=(7, 4))
         ax = fig.subplots()
-        for key, values in series.items():
-            ax.plot(epochs, values, label=labels.get(key, key), marker=".", ms=3)
+
+        if "train_nll" in series:
+            labels["val_loss"] = "validation (true NLL)"
+            handles = []
+            for key in ("train_nll", "val_loss"):
+                if key in series:
+                    handles += ax.plot(epochs, series[key], label=labels[key], marker=".", ms=3)
+            ax.set_ylabel("true NLL")
+            ax_beta = ax.twinx()
+            handles += ax_beta.plot(epochs, series["loss"], label="train (β-NLL objective)",
+                                    color="C2", ls="--", marker=".", ms=3)
+            ax_beta.set_ylabel("β-NLL")
+            ax.legend(handles=handles)
+        else:
+            for key, values in series.items():
+                ax.plot(epochs, values, label=labels.get(key, key), marker=".", ms=3)
+            ax.set_ylabel("loss")
+            ax.legend()
+
         ax.set_xlabel("epoch")
-        ax.set_ylabel("loss")
         ax.set_title(run_dir.name)
         ax.grid(True, alpha=0.3)
-        ax.legend()
         fig.tight_layout()
         plots_dir = run_dir / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
@@ -219,12 +246,16 @@ class GridSearchBase:
         self.setup()
         context = self._prepare(**prepare_kwargs)
 
+        point_seconds = []  # per-point wall time for points run this session, for the ETA
         for i, point in enumerate(self.points):
             rid = run_id(point)
             run_dir = self.runs_dir / rid
             metrics_path = run_dir / "metrics.json"
+            progress = f"({i + 1}/{len(self.points)})"
             if metrics_path.exists():
-                print(f"[grid] ({i + 1}/{len(self.points)}) skip {rid} (done)")
+                stored = json.loads(metrics_path.read_text()).get("train_seconds")
+                took = f"  {format_duration(stored)}" if stored is not None else ""
+                print(f"[grid] {progress} skip {rid} (done{took})")
                 continue
 
             (run_dir / "plots").mkdir(parents=True, exist_ok=True)
@@ -239,7 +270,12 @@ class GridSearchBase:
             with open(metrics_path, "w") as f:
                 json.dump(metrics, f, indent=2)
             self._append_run_record(rid, point, metrics)
-            print(f"[grid] ({i + 1}/{len(self.points)}) done {rid}")
+
+            point_seconds.append(metrics["train_seconds"])
+            elapsed = format_duration(sum(point_seconds))
+            eta = format_duration(np.mean(point_seconds) * (len(self.points) - i - 1))
+            print(f"[grid] {progress} done {rid}  {format_duration(metrics['train_seconds'])}"
+                  f"  [session {elapsed}, eta {eta}]")
 
         self._write_leaderboard()
         return self.exp_dir

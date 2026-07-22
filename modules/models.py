@@ -156,7 +156,7 @@ class TCN_channel(nn.Module):
         out = self.tcn(x)     # [B,H,T]
         out = self.readout(out) # [B, 3, T] mean | std | nu
         mean_out = out[:, 0, :]
-        log_std_out = out[:, 1, :]
+        log_std_out = torch.clamp(out[:, 1, :], min=-15.0, max=10.0)
         std_out = torch.exp(log_std_out)
         if not self.gaussian:
             log_nu_out = out[:, 2, :]
@@ -377,7 +377,7 @@ class LRU_channel(nn.Module):
         if not self.learn_noise:
             return mean_out
 
-        std_out = torch.exp(out[..., 1])
+        std_out = torch.exp(torch.clamp(out[..., 1], min=-15.0, max=10.0))
         if self.gaussian:
             z = torch.randn_like(mean_out)
             noisy_out = mean_out + std_out * z

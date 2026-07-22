@@ -8,8 +8,8 @@ RUNTIME:
 # ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/encoder_decoder_YYYYMMDD_HHMM
 
 
-CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/mint_surf_channel_models_20260704_2358
-# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/azure_vault_encoder_decoder_20260629_0738
+CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/fresh_echo_channel_models_20260716_1726
+# ENCODER_DECODER_EXP_DIR:
 HARDWARE_RESOURCES:
     Agilent_33250A:
         DRIVER_PATH: pyflux.hardware.drivers
@@ -20,30 +20,30 @@ HARDWARE_RESOURCES:
     HP_EE3631A:
         DRIVER_PATH: pyflux.hardware.drivers
         ID: HEWLETT-PACKARD,E3631A,0,1.6-5.0-1.0
-DATA_COLLECTION:
-  N: 5000 # Number of datapoints collected at the DC offset
+DATA_COLLECTION: 
+  N: 10000 # Number of datapoints collected at the DC offset
   DC_OFFSETS: [0.050] # A (single offset per dataset)
-  F_MINS: [300e3] # Hz
+  F_MINS: [1e6] # Hz
   F_MAXS: [7.6e6] # Hz
   OSC_SAMPLE_RATES: [500e6] # Hz
   SUBCARRIER_SPACING: 100e3 # Hz
   UPSAMPLE_FACTOR: 4
-  AWG_TABLE_FRACTION: 0.5
+  AWG_TABLE_FRACTION: 0.125
   CP_LENGTH_FRACTION: 0.125
   PREAMBLE_LENGTH: 256
   MODULATION_FORMAT: "m7_apsk_constellation"
   OSC_SCALE: 0.5 # V/div
-  POWER_MIN: 0.5  # minimum symbol power
-  POWER_MAX: 3.0  # maximum symbol power; at 3 the +/-3 clip becomes apparent
-  JITTER_POWER: 0.2 # off-constellation complex noise on symbols (collection only); 0 disables
-  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/dc0.05A_fmin300000_fmax7.6e+06_20260703_1631.zarr
+  POWER_MIN: 0.1  # minimum symbol power
+  POWER_MAX: 1.5  # maximum symbol power
+  JITTER_POWER: 0 # off-constellation complex noise on symbols (collection only); 0 disables
+  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/fresh_echo_dc0.05A_fmin1e+06_fmax7.6e+06_20260715_1828.zarr
   CLIP_THRESHOLD: 3.0 # clip the AWG output to +/-this value (V)
 
 CHANNEL_GRID_SEARCH:
-  RECEPTIVE_FIELD: 20
-  VAL_FRACTION: 0.2
-  EXCLUDE_WARMUP: false       # drop the first receptive_field samples (causal warm-up,
-                             # zero-padded context) from the channel-model loss AND rRMSE.
+  VAL_FRACTION: 0.1
+  EXCLUDE_WARMUP: false
+  SELECTION_MODE: best  # "best" or "best_per_size" or "all"
+  PROB_SELECTION_KEY: val_per_burst_rrmse_pct  # for probabilistic models, the metric used to select the best run
                             
   # SELECTED_RUN_IDS:        # optional: pin exactly which channel runs advance to the
   #   - tcn_1a2b3c4d         # encoder/decoder stage.
@@ -51,91 +51,149 @@ CHANNEL_GRID_SEARCH:
   models:
     - model: gmp
       params:
-        memory_linear: 49
-        memory_nonlinear: 49
+        memory_linear: 105
+        memory_nonlinear: 105
         nonlinearity_order: [3, 4]
         cross_term_depth: [8, 16]
         ridge: 1.0e-3
 
     - model: tcn
-      params:
-        nlayers: [2, 3, 4]
-        hidden_channels: [8, 16]
-        kernel_size: [8]
+      params: 
+        nlayers: [3]
+        hidden_channels: [2, 4, 8, 16]
+        kernel_size: [16]
         dilation_base: 2
-        epochs: 150
+        epochs: 200
         lr: 1.0e-3
         batch_size: 16
         factor: 0.5 # Learning rate scheduler
-        patience: 5
+        patience: 25
         min_lr: 1.0e-6
         distribution: ["none"]
 
     - model: tcn
       params:
-        nlayers: [2, 3, 4]
-        hidden_channels: [8, 16]
-        kernel_size: [8]
+        nlayers: [3]
+        hidden_channels: [2, 4, 8, 16]
+        kernel_size: [16]
         dilation_base: 2
-        epochs: 150
+        epochs: 200
         lr: 1.0e-3
         batch_size: 16
         factor: 0.5 # Learning rate scheduler
-        patience: 5
+        patience: 25
         min_lr: 1.0e-6
         distribution: ["gaussian", "students_t"]
-        beta_nll: [0.5]
+        beta_nll: [0.5, 1]
 
     - model: lru   # Linear Recurrent Unit
       params:
-        state_dim: [2, 4, 8]      # linear state-space size (memory capacity)
-        hidden_dim: [8, 16, 32]     # per-timestep feature width
+        state_dim: [8, 16]      # linear state-space size (memory capacity)
+        hidden_dim: [8, 16]     # per-timestep feature width
         n_layers: 2
         dropout: 0.1
         r_min: 0.0               # eigenvalue-radius init range; r_max -> 1 allows long memory
         r_max: 1.0
         max_phase: 6.28          # init phase spread (2*pi) of the state eigenvalues
-        epochs: 150
+        epochs: 200
         lr: 1.0e-3
         batch_size: 16
         factor: 0.5 # Learning rate scheduler
-        patience: 5
+        patience: 25
         min_lr: 1.0e-6
         distribution: ["none"]
 
     - model: lru
       params:
-        state_dim: [2, 4, 8]
-        hidden_dim: [8, 16, 32]
+        state_dim: [8, 16]
+        hidden_dim: [8, 16]
         n_layers: 2
         dropout: 0.1
         r_min: 0.0
         r_max: 1.0
         max_phase: 6.28
-        epochs: 150
+        epochs: 200
         lr: 1.0e-3
         batch_size: 16
         factor: 0.5
-        patience: 5
+        patience: 25
         min_lr: 1.0e-6
         distribution: ["gaussian", "students_t"]
-        beta_nll: [0.5]
+        beta_nll: [0.5, 1]
 
 ENCODER_DECODER:
   CONSTELLATION: qpsk
   PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to +-this
+  RUNS_PER_ARCH: 6
   params:
-    nlayers: [3]
+    nlayers: [2]
     dilation_base: [2]
-    kernel_size: [6]
+    kernel_size: [16]
     hidden_channels: [16]
-    epochs: 200
+    epochs: 1500
+    noise_anneal_start: [0.5]   # fraction of epochs at full channel noise before a linear
+                              # decay to 0 by the last epoch; 1.0 disables annealing.
+                              # Only affects probabilistic channels; sweep e.g. [1.0, 0.5]
+                              # to compare (note: also duplicates nonprob runs, where it is inert)
     lr: 1.0e-3
-    weight_decay: 1.0e-5    # AdamW L2 regularization; 0 disables. List -> swept.
-    batch_size: 16
+    weight_decay: [1e-5]  # AdamW L2 regularization; 0 disables.
+    batch_size: 64
     factor: 0.5 # Learning rate scheduler
-    patience: 3
+    patience: 25
     min_lr: 1.0e-6
+    clip_penalty_weight: [0, 1.0, 10.0]  # weight on the low-side clip-avoidance penalty; 0 disables (ablation)
+    clip_penalty_rho: [0.5]   # tau = rho * peak channel gain; grid the compression threshold
+                                  
 
 ENCODER_DECODER_VALIDATION:
   CONSTELLATION: qpsk
+  NOISE_FLOOR_POINTS: 20  # repeats of one fixed encoded symbol to estimate the additive
+                           # noise floor per E/D; 0 disables the noise-floor plot
+
+
+
+
+# _____________________ Stand Alone Follow Up Experiments _____________________
+
+  # Standalone follow-up (experiments/higher_order_test.py), run after a finished
+  # train_and_validate. Retrains the best E/D's architecture on higher-order
+  # constellations using the channel model it was trained against, then validates on
+  # live hardware to measure the spectral efficiency each modulation order sustains.
+  HIGHER_ORDER_TEST:
+    ENABLED: true
+    CONSTELLATION: [m7_apsk_constellation, m6_apsk_constellation]   # one name or a list, e.g. [m6_apsk_constellation, m7_apsk_constellation]
+    N: 50                                  # validation trials per constellation
+    ED_RUN_ID:    # pin an E/D run_id; null -> lowest validation EVM
+    CHANNEL_EXP_DIR:   # finished channel_models_ dir (channel model to retrain against)
+    VALIDATION_EXP_DIR: # finished ed_validation_ dir (source of the best E/D arch + channel)
+
+# Standalone follow-up (experiments/controlled_cdf.py), run after a finished
+# train_and_validate.
+CONTROLLED_CDF:
+  ENABLED: true
+  SEEDS: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]   # one E/D per seed per channel form; controls the n
+  ANNEAL_STARTS: [1.0, 0.5, 0.25, 0.1]  
+  N: 20                             # validation trials per E/D
+  EXCLUDE_MODELS: [gmp, lru]             # channel model types to skip (e.g. gmp is slow); [] keeps all
+  CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/fresh_echo_channel_models_20260716_1726
+
+# Standalone offline learning curve (experiments/dataset_size_sweep.py): fits one fixed
+# channel architecture on growing subsets of a dataset and plots val per-burst rRMSE vs
+# training size.
+DATA_SIZE_SWEEP:
+  DATASET_PATH:                     # blank -> use DATA_COLLECTION.DATASET_PATH
+  VAL_FRACTION: 0.1
+  TRAIN_SIZES: [500, 1000, 2000, 4000, 6000, 8000, 9000]
+  model: tcn
+  params:
+    nlayers: 3
+    hidden_channels: 16              # fixed architecture; a list uses the first value
+    kernel_size: 16
+    dilation_base: 2
+    epochs: 200
+    lr: 1.0e-3
+    batch_size: 16
+    factor: 0.5
+    patience: 25
+    min_lr: 1.0e-6
+    distribution: none

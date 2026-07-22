@@ -25,16 +25,25 @@ from modules.models import TCN
 from modules.utils import calculate_BER, evm_pct
 
 ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels")
+N_CONSTELLATION_TRIALS = 4  # trials shown in the equalization-comparison figure
 
 
 class EncoderDecoderValidation(GridSearchBase):
     def __init__(self, ed_models, ofdm_blocks, num_trials, constellation, clip_value,
-                 device="cpu", seed=0, experiments_dir=None, experiment_name="ed_validation",
-                 run_prefix=None, debug=False):
-        self.ofdm_blocks = ofdm_blocks  # (modulate, send, measure, resample, demod)
+                 noise_floor_points=0, higher_order_context=None, device="cpu", seed=0,
+                 experiments_dir=None, experiment_name="ed_validation", run_prefix=None,
+                 debug=False):
+        # (modulate, send, measure, resample, demod) or with an optional FractionalSync
+        # block inserted just before demod
+        self.ofdm_blocks = ofdm_blocks
         self.num_trials = num_trials
         self.constellation = constellation
         self.clip_value = clip_value
+        self.noise_floor_points = int(noise_floor_points)
+
+        # when set (dict with f_min, f_max, symbol_period_s), a higher-order-test
+        # constellation diagram is produced that also reports the spectral efficiency
+        self.higher_order_context = higher_order_context
 
         points = [{"model": m["run_id"],
                    "params": {k: m["arch"][k] for k in ARCH_KEYS},
@@ -71,19 +80,34 @@ class EncoderDecoderValidation(GridSearchBase):
         return encoder, decoder
 
     def _run_point(self, point, run_dir, context) -> dict:
-        modulate, send, measure, resample, demod = self.ofdm_blocks
+        modulate, send, measure, resample, *sync_blocks, demod = self.ofdm_blocks
         encoder, decoder = self._load_pair(point["params"], point["checkpoint"])
         chain = Chain([modulate,
                        ApplyEncoder(encoder, modulate, self.clip_value, self.device),
-                       send, measure, resample,
+                       send, measure, resample, *sync_blocks,
                        ApplyDecoder(decoder, demod, self.device, debug=self.debug),
                        demod])
 
         sent_syms, recv_syms, true_bits, sent_time, recv_time = [], [], [], [], []
+        frac_delays, encoder_powers = [], []
+        fft_length = demod.ofdm_symbol_length_with_cp - demod.cyclic_prefix_length
         freqs, example = None, None
+        # per-stage constellations for the first few trials (equalization-comparison figure)
+        ed_constellations = {"Sent": [], "Encoded": [], "Received": [], "Decoded": []}
+        sync_outliers_skipped = 0
+        max_sync_retries = 3
         for i in range(self.num_trials):
-            x = chain.run(Signal(data=np.zeros(1), sampling_rate=modulate.fs_out))
-            art = x.artifact_container
+            for attempt in range(max_sync_retries + 1):
+                x = chain.run(Signal(data=np.zeros(1), sampling_rate=modulate.fs_out))
+                art = x.artifact_container
+                if not art.get("sync_outlier"):
+                    break
+                sync_outliers_skipped += 1
+                residual = art.get("residual_delay_samples", float("nan"))
+                retries_left = max_sync_retries - attempt
+                if retries_left > 0:
+                    print(f"  sync outlier on trial {i + 1} (residual {residual:+.3f} samples), "
+                          f"retrying ({retries_left} left)")
 
             if self.debug:
                 print(f"trial {i + 1}/{self.num_trials}  sent={art['sent_symbols'].shape} "
@@ -96,7 +120,23 @@ class EncoderDecoderValidation(GridSearchBase):
             true_bits.append(self._bits(art["source_bits"]))
             sent_time.append(np.asarray(art["sent_baseband"], dtype="float32"))
             recv_time.append(np.asarray(x.data, dtype="float32"))
+            if "fractional_delay_samples" in art:
+                frac_delays.append(float(art["fractional_delay_samples"]))
+            # symbol power in the same units as POWER_MIN/POWER_MAX (mean-square of the
+            # payload, what ModulateDataOFDM's random scaling targets)
+            encoder_output = np.asarray(art["encoder_output"], dtype=np.float64)
+            encoder_powers.append(float(np.mean(encoder_output[-fft_length:] ** 2)))
             freqs = np.asarray(art["subcarrier_freqs_hz"])
+
+            # equalization-comparison stages: the constellation as it passes encoder ->
+            # channel -> decoder. Encoded/Received are FFT'd from the time-domain symbols;
+            # Sent/Decoded are the demodulated frequency-domain symbols.
+            if len(ed_constellations["Sent"]) < N_CONSTELLATION_TRIALS:
+                ed_constellations["Sent"].append(np.asarray(art["sent_symbols"]))
+                ed_constellations["Encoded"].append(self._symbol_constellation(art["encoder_output"], demod))
+                ed_constellations["Received"].append(self._symbol_constellation(art["decoder_input"], demod))
+                ed_constellations["Decoded"].append(np.asarray(art["received_symbols"]))
+
             if i == 0:
                 example = {k: np.asarray(art[k]) for k in
                            ("encoder_input", "encoder_output", "decoder_input", "decoder_output")}
@@ -116,8 +156,14 @@ class EncoderDecoderValidation(GridSearchBase):
             "channel_receptive_field": point.get("channel_receptive_field"),
             "channel_distribution": point.get("channel_distribution", "none"),
         }
+        if frac_delays:
+            metrics["frac_delay_std_samples"] = float(np.std(frac_delays))
+        metrics["encoder_power_mean"] = float(np.mean(encoder_powers))
+        metrics["encoder_power_std"] = float(np.std(encoder_powers))
+        metrics["sync_outliers_skipped"] = sync_outliers_skipped
 
-        self._store_waveforms(run_dir.name, np.stack(sent_time), np.stack(recv_time), point["channel_form"])
+        self._store_waveforms(run_dir.name, np.stack(sent_time), np.stack(recv_time), point["channel_form"],
+                              frac_delays=np.asarray(frac_delays, dtype="float32") if frac_delays else None)
         label = f"{run_dir.name} | channel: {point['channel_form']}"
         self._plot_constellation(run_dir, sent_syms, recv_syms, freqs,
                                  ed_run_id=run_dir.name,
@@ -125,12 +171,200 @@ class EncoderDecoderValidation(GridSearchBase):
                                  channel_run_id=point.get("channel_run_id"),
                                  evm=metrics["evm_pct"])
         self._plot_waveform(run_dir, example, label)
+        self._plot_encoder_power(run_dir, encoder_powers)
+
+        # final step: a few trials of raw OFDM with no encoder/decoder in the loop, so the
+        # equalization-comparison figure can contrast the E/D against no ML equalization
+        no_ed_chain = Chain([modulate, send, measure, resample, *sync_blocks, demod])
+        no_ed_sent, no_ed_received = [], []
+        for _ in range(N_CONSTELLATION_TRIALS):
+            x = no_ed_chain.run(Signal(data=np.zeros(1), sampling_rate=modulate.fs_out))
+            no_ed_sent.append(np.asarray(x.artifact_container["sent_symbols"]))
+            no_ed_received.append(np.asarray(x.artifact_container["received_symbols"]))
+        self._plot_equalization_comparison(run_dir, point["channel_form"],
+                                           ed_constellations, no_ed_sent, no_ed_received, freqs)
+
+        if self.noise_floor_points > 0:
+            self._plot_noise_floor(run_dir, encoder, decoder, sent_syms, recv_syms, freqs)
+
+        if self.higher_order_context is not None:
+            self._plot_higher_order_constellation(run_dir, sent_syms, recv_syms, freqs,
+                                                  evm=metrics["evm_pct"], ber=metrics["ber"])
         return metrics
 
+    def _plot_higher_order_constellation(self, run_dir, sent_syms, recv_syms, freqs, evm, ber):
+        '''Received equalized constellation for a higher-order APSK test, styled like the
+        equalization-comparison panels (unit-power scatter coloured by carrier frequency,
+        ideal reference overlaid in red). The received EVM and BER measured over every trial
+        and the nominal spectral efficiency at this modulation order go in the title, so they
+        do not overlap the constellation points.'''
+        context = self.higher_order_context
+        sent_syms = np.asarray(sent_syms)
+        recv_syms = np.asarray(recv_syms)
+
+        bits_per_carrier = self.constellation.bits_per_symbol
+        modulation_order = 2 ** bits_per_carrier
+        num_carriers = sent_syms.shape[1]
+        bandwidth_hz = float(context["f_max"] - context["f_min"])
+        symbol_period_s = float(context["symbol_period_s"])
+        spectral_efficiency = num_carriers * bits_per_carrier / (symbol_period_s * bandwidth_hz)
+
+        scale = np.sqrt(np.mean(np.abs(sent_syms) ** 2)) + 1e-12
+        received = recv_syms.ravel() / scale
+        reference = sent_syms.ravel() / scale
+        carrier_color = np.tile(np.asarray(freqs), sent_syms.shape[0])
+
+        fig = Figure(figsize=(7.5, 6.5))
+        ax = fig.subplots()
+        scatter = ax.scatter(received.real, received.imag, s=8, c=carrier_color, cmap="viridis")
+        ax.scatter(reference.real, reference.imag, s=45, marker="x", c="red",
+                   linewidth=1.3, zorder=5)
+
+        ax.set_xlabel("In-Phase")
+        ax.set_ylabel("Quadrature")
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect("equal", "box")
+        fig.colorbar(scatter, ax=ax, label="Carrier Frequency (Hz)", fraction=0.046, pad=0.04)
+
+        title = (f"Received Equalized {modulation_order} APSK Constellation Diagram\n"
+                 "(Trained on Best Channel Model)\n"
+                 f"Received EVM = {evm:.1f}% | Received BER = {ber:.2e} | "
+                 f"Spectral Efficiency (Nominal) = {spectral_efficiency:.2f} bit/s/Hz")
+        fig.suptitle(title, fontsize=11)
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        fig.savefig(run_dir / "plots" / "higher_order_constellation.png", dpi=130,
+                    bbox_inches="tight")
+
+    def _plot_noise_floor(self, run_dir, encoder, decoder, sent_syms, recv_syms, freqs):
+        '''Contrast the empirical end-to-end residual EVM (from the validation trials)
+        with the additive noise floor. The noise floor is estimated by encoding one fixed
+        symbol and replaying its AWG waveform through channel -> decoder N times: with the
+        transmitted waveform identical, the per-carrier variance about the mean is pure
+        additive noise, measured at the same point as the end-to-end EVM.'''
+        modulate, send, measure, resample, *sync_blocks, demod = self.ofdm_blocks
+
+        residual_power = np.mean(np.abs(sent_syms - recv_syms) ** 2, axis=0)
+        signal_power = np.mean(np.abs(sent_syms) ** 2, axis=0)
+        end_to_end_evm = np.sqrt(residual_power / (signal_power + 1e-12)) * 100
+
+        encode_chain = Chain([modulate, ApplyEncoder(encoder, modulate, self.clip_value, self.device)])
+        fixed = encode_chain.run(Signal(data=np.zeros(1), sampling_rate=modulate.fs_out))
+        fixed_awg = np.asarray(fixed.artifact_container["awg_waveform"])
+        fixed_preamble = np.asarray(fixed.artifact_container["preamble"])
+        fixed_sent = np.asarray(fixed.artifact_container["sent_symbols"])
+
+        replay_chain = Chain([send, measure, resample, *sync_blocks,
+                              ApplyDecoder(decoder, demod, self.device), demod])
+        repeated_received = []
+        for _ in range(self.noise_floor_points):
+            signal = Signal(data=np.zeros(1), sampling_rate=modulate.fs_out)
+            signal.artifact_container["awg_waveform"] = fixed_awg
+            signal.artifact_container["preamble"] = fixed_preamble
+            out = replay_chain.run(signal)
+            repeated_received.append(np.asarray(out.artifact_container["received_symbols"]))
+        repeated_received = np.stack(repeated_received)
+
+        noise_power = np.mean(np.abs(repeated_received - repeated_received.mean(axis=0)) ** 2, axis=0)
+        reference_power = np.abs(fixed_sent) ** 2
+        noise_floor_evm = np.sqrt(noise_power / (reference_power + 1e-12)) * 100
+
+        frequencies_mhz = np.asarray(freqs) / 1e6
+        end_to_end_mean = float(np.sqrt(np.mean(residual_power) / (np.mean(signal_power) + 1e-12)) * 100)
+        noise_floor_mean = float(np.sqrt(np.mean(noise_power) / (np.mean(reference_power) + 1e-12)) * 100)
+
+        fig = Figure(figsize=(6, 4))
+        ax = fig.subplots()
+        ax.plot(frequencies_mhz, end_to_end_evm, color="#0072B2", marker="o", markersize=3,
+                linewidth=1.2, label=f"End-to-end residual (mean {end_to_end_mean:.1f}%)")
+        ax.plot(frequencies_mhz, noise_floor_evm, color="#D55E00", marker="^", markersize=3,
+                linewidth=1.2, linestyle="--",
+                label=f"Estimated noise floor (mean {noise_floor_mean:.1f}%)")
+        ax.set_xlabel("Frequency (MHz)")
+        ax.set_ylabel("EVM (%)")
+        ax.set_title("End-to-End Residual EVM% vs. Estimated EVM% Noise Floor")
+        ax.set_ylim(bottom=0)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, frameon=False)
+
+        fig.tight_layout()
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        fig.savefig(run_dir / "plots" / "noise_floor_evm.png", dpi=130, bbox_inches="tight")
+
+    def _symbol_constellation(self, time_symbol_with_cp, demod):
+        '''FFT a [CP | payload] time-domain symbol down to the active-carrier constellation,
+        matching how DemodulateDataOFDM recovers received_symbols.'''
+        payload = np.asarray(time_symbol_with_cp)[demod.cyclic_prefix_length:]
+        return np.fft.fft(payload, norm="ortho")[demod.subcarrier_indicies]
+
+    def _plot_equalization_comparison(self, run_dir, channel_form, ed_stages,
+                                      no_ed_sent, no_ed_received, freqs):
+        '''Two-row constellation figure contrasting the E/D chain against raw OFDM with no
+        ML in the loop. Columns are the constellation as it moves Sent -> Encoded ->
+        Received -> Decoded; each panel is normalized to unit average power so the shape
+        is visible, and the final column overlays the ideal reference and its EVM.'''
+        stage_names = ["Sent", "Encoded", "Received", "Decoded"]
+        # without an E/D, encoding is the identity and there is no decoder, so the encoded
+        # panel repeats Sent and the decoded panel repeats the raw Received
+        no_ed_stages = {"Sent": no_ed_sent, "Encoded": no_ed_sent,
+                        "Received": no_ed_received, "Decoded": no_ed_received}
+        rows = [
+            ("With Encoder/Decoder", ed_stages, ed_stages["Sent"], ed_stages["Decoded"]),
+            ("Without Encoder/Decoder", no_ed_stages, no_ed_sent, no_ed_received),
+        ]
+
+        def unit_power(symbol_list):
+            symbols = np.concatenate([np.asarray(s) for s in symbol_list])
+            return symbols / (np.sqrt(np.mean(np.abs(symbols) ** 2)) + 1e-12)
+
+        def evm_percent(sent_list, recovered_list):
+            sent = np.concatenate([np.asarray(s) for s in sent_list])
+            recovered = np.concatenate([np.asarray(r) for r in recovered_list])
+            return float(np.sqrt(np.mean(np.abs(sent - recovered) ** 2)
+                                 / (np.mean(np.abs(sent) ** 2) + 1e-12)) * 100)
+
+        fig = Figure(figsize=(14, 7.5))
+        axes = fig.subplots(2, 4)
+        for row_index, (row_label, stages, sent_list, final_list) in enumerate(rows):
+            row_evm = evm_percent(sent_list, final_list)
+            reference = unit_power(sent_list)
+            color = np.tile(np.asarray(freqs), len(sent_list))
+
+            for col_index, stage_name in enumerate(stage_names):
+                ax = axes[row_index][col_index]
+                symbols = unit_power(stages[stage_name])
+                scatter = ax.scatter(symbols.real, symbols.imag, s=8, c=color, cmap="viridis")
+
+                if stage_name == "Decoded":
+                    ax.scatter(reference.real, reference.imag, s=45, marker="x", c="red",
+                               linewidth=1.3, zorder=5)
+                    ax.text(0.04, 0.96, f"received EVM = {row_evm:.1f}%", transform=ax.transAxes,
+                            ha="left", va="top", fontsize=10, weight="bold",
+                            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="none"))
+
+                if row_index == 0:
+                    ax.set_title(stage_name, fontsize=11)
+                ax.set_ylabel(f"{row_label}\n\nQuadrature" if col_index == 0 else "Quadrature",
+                              fontsize=9 if col_index == 0 else 8)
+                ax.set_xlabel("In-Phase", fontsize=8)
+                ax.grid(True, alpha=0.3)
+                ax.set_aspect("equal", "box")
+
+        fig.colorbar(scatter, ax=axes.ravel().tolist(), label="Carrier Frequency (Hz)",
+                     fraction=0.02, pad=0.02)
+        fig.suptitle("Comparison of Encoder Decoder Equalization to No Equalization "
+                     f"(Trained on {channel_form} Channel Model)", fontsize=13)
+        fig.text(0.5, 0.01, "Each panel normalized to unit average power. "
+                 "Red x marks the ideal reference constellation.", ha="center", fontsize=9)
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        fig.savefig(run_dir / "plots" / "equalization_comparison.png", dpi=130, bbox_inches="tight")
+
     # ------------------------------------------------------------- artifacts
-    def _store_waveforms(self, model_id, sent, received, channel_form):
+    def _store_waveforms(self, model_id, sent, received, channel_form, frac_delays=None):
         g = self.val_group[model_id] if model_id in self.val_group else self.val_group.create_group(model_id)
-        for name, arr in (("sent_time", sent), ("received_time", received)):
+        arrays = [("sent_time", sent), ("received_time", received)]
+        if frac_delays is not None:
+            arrays.append(("fractional_delay_samples", frac_delays))
+        for name, arr in arrays:
             za = g.create_array(name, shape=arr.shape, chunks=arr.shape, dtype=arr.dtype, overwrite=True)
             za[:] = arr
         g.attrs["channel_form"] = channel_form
@@ -166,26 +400,63 @@ class EncoderDecoderValidation(GridSearchBase):
             fig.suptitle(suptitle)
         fig.savefig(run_dir / "plots" / "constellation.png", dpi=120)
 
+    def _plot_encoder_power(self, run_dir, powers):
+        '''Histogram of per-trial encoder output symbol power (same units as the
+        data-collection POWER_MIN/POWER_MAX), to check the E/D operating point
+        against the channel-model training power range.'''
+        powers = np.asarray(powers)
+        fig = Figure(figsize=(6, 4))
+        ax = fig.subplots()
+        ax.hist(powers, bins="auto", edgecolor="black", alpha=0.8)
+        ax.set_xlabel("Encoder output symbol power (RMS², config POWER units)")
+        ax.set_ylabel("Frequency")
+        ax.set_title(f"{run_dir.name} - encoder output power\n"
+                     f"mean RMS power = {powers.mean():.3f} (std = {powers.std():.3f}, "
+                     f"n = {len(powers)})")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        fig.savefig(run_dir / "plots" / "encoder_power.png", dpi=120)
+
     def _plot_waveform(self, run_dir, example, label):
-        # mark=True rows are the sliced [CP|symbol] decoder window (indexed from 0); draw a
-        # red line at the CP->symbol boundary (where the FFT window starts) in slice coords.
+        # The transmit-domain rows (encoder in/out, decoder output) share a fixed
+        # +-clip_value scale (AWG units) so drive amplitude and reconstruction quality
+        # are directly comparable: the decoder output should look like the encoder input.
+        # The decoder input is the received scope waveform (a different, smaller scale) and
+        # the residual is a small error signal, so both autoscale on their own axes.
+        #
+        # The red line marks the CP -> FFT-window boundary on the sliced [CP | payload]
+        # decoder rows: samples left of it are the discarded cyclic prefix, samples right
+        # of it are the payload that demod actually FFTs.
+        TRANSMIT_DOMAIN = "fixed"
+        OWN_SCALE = "auto"
         rows = [
-            ("encoder input", example["encoder_input"], False),
-            ("encoder output", example["encoder_output"], False),
-            ("decoder input", example["decoder_input"], True),
-            ("decoder output", example["decoder_output"], True),
-            ("residual (sent - recovered symbol)", example["residual"], False),
+            ("encoder input", example["encoder_input"], False, TRANSMIT_DOMAIN),
+            ("encoder output", example["encoder_output"], False, TRANSMIT_DOMAIN),
+            ("decoder input (received)", example["decoder_input"], True, OWN_SCALE),
+            ("decoder output (recovered)", example["decoder_output"], True, TRANSMIT_DOMAIN),
+            ("residual (sent - recovered)", example["residual"], False, OWN_SCALE),
         ]
         window = example.get("decoder_window")
+
         fig = Figure(figsize=(9, 11))
         axes = fig.subplots(len(rows), 1)
-        for ax, (title, signal, mark) in zip(axes, rows):
+        for ax, (title, signal, mark, scale) in zip(axes, rows):
             ax.plot(signal, lw=1)
+
             if mark and window is not None:
                 for bound in window:
-                    ax.axvline(bound, color="red", lw=1.0)
+                    ax.axvline(bound, color="red", lw=1.0, label="CP -> FFT window")
+                ax.legend(fontsize=7, loc="upper right")
+
+            if scale == TRANSMIT_DOMAIN:
+                ax.set_ylim(-1.1 * self.clip_value, 1.1 * self.clip_value)
+                ax.axhline(self.clip_value, color="grey", lw=0.8, ls=":")
+                ax.axhline(-self.clip_value, color="grey", lw=0.8, ls=":")
+
             ax.set_ylabel(title, fontsize=8)
             ax.grid(True, alpha=0.3)
+
         axes[-1].set_xlabel("Sample index")
         fig.suptitle(label)
         fig.savefig(run_dir / "plots" / "waveform.png", dpi=120)

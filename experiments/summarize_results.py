@@ -1,5 +1,5 @@
 """
-summarize_results.py  —  aggregate multi-DC-offset results and generate paper figures.
+Aggregate multi-DC-offset results and generate paper figures.
 
 Edit RUN_CONFIGS and PLOT_PATH at the top, then:
     cd <repo_root>/experiments
@@ -7,6 +7,9 @@ Edit RUN_CONFIGS and PLOT_PATH at the top, then:
 
 Each RUN_CONFIG entry must point to:
   - channel_exp_dir  : channel-model grid-search output folder
+  - ed_exp_dir       : encoder-decoder grid-search output folder (E/D checkpoints;
+                       needed to replay validation bursts for the predicted-vs-actual
+                       EVM transfer plot)
   - ed_val_exp_dir   : ed_validation output folder (must pair with the
                        encoder-decoder grid search that used the above channel models)
   - dataset_path     : the zarr dataset the channel models were trained on
@@ -28,16 +31,17 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from modules.grid_search.adapters import MODEL_REGISTRY
-from modules.utils import calculate_rrmse_pct_loss
+from modules.utils import calculate_per_burst_rrmse_pct_loss
 
-# ─── USER CONFIG ────────────────────────────────────────────────────────────────
+# USER CONFIG
 RUN_CONFIGS = [
     {
-        "label": "NAmA",
-        "dc_ma": -99,
-        "channel_exp_dir": "data/experiments/train_and_validate/mint_surf_channel_models_20260704_2358",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/sleek_slope_ed_validation_20260705_1303",
-        "dataset_path":    "data/sweeps/dc0.05A_fmin300000_fmax7.6e+06_20260703_1631.zarr",
+        "label": "50 mA",
+        "dc_ma": 50,
+        "channel_exp_dir": "data/experiments/train_and_validate/fresh_echo_channel_models_20260716_1726",
+        "ed_exp_dir":      "data/experiments/train_and_validate/fresh_echo_encoder_decoder_20260717_0644",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/fresh_echo_ed_validation_20260717_0751",
+        "dataset_path":    "data/sweeps/fresh_echo_dc0.05A_fmin1e+06_fmax7.6e+06_20260715_1828.zarr",
     },
     # add more DC offsets here, e.g.:
     # {
@@ -53,10 +57,7 @@ PLOT_PATH       = Path(__file__).resolve().parent.parent / "data/plots"
 DEVICE          = "cpu"
 N_POWER_BINS    = 10       # bins for plot 1
 MAX_QQ_SAMPLES  = 10_000  # downsample for Q-Q speed
-# ────────────────────────────────────────────────────────────────────────────────
-
-
-# ─── STYLE (matches make_figures.ipynb) ─────────────────────────────────────────
+# Style (matches make_figures.ipynb)
 _FONT = 7
 _SMALL = 5
 _mm = 1 / 25.4
@@ -93,19 +94,26 @@ plt.rcParams.update({
     "axes.linewidth": 0.8,
 })
 
-_CMAP = plt.get_cmap("viridis")
+_CMAP = plt.get_cmap("viridis")   # sequential scales only (frequency/power gradients)
 
-# Shared style dictionary: (model_family, distribution) → plot kwargs.
+# Shared style dictionary: (model_family, distribution) -> plot kwargs.
 # Used identically across all figures so the same model type always looks the same.
+# Okabe-Ito palette (colorblind-safe), assigned semantically: near-black = GMP
+# baseline, cool hues = nonprob (blue TCN, green LRU), warm hues = prob
+# (orange/vermillion TCN, purple/sky LRU). Adjacent-pair CVD separation validated
+# (worst ΔE 19 under protan/deutan/tritan simulation vs floor 8 / target 12).
 MODEL_STYLES: dict[tuple[str, str], dict] = {
-    ("gmp", "none"):       {"color": _CMAP(0.05), "marker": "o", "linestyle": "-"},
-    ("tcn", "none"):       {"color": _CMAP(0.38), "marker": "^", "linestyle": "--"},
-    ("tcn", "gaussian"):   {"color": _CMAP(0.65), "marker": "s", "linestyle": "-."},
-    ("tcn", "students_t"): {"color": _CMAP(0.90), "marker": "D", "linestyle": ":"},
+    ("gmp", "none"):       {"color": "#333333", "marker": "o", "linestyle": "-"},
+    ("tcn", "none"):       {"color": "#0072B2", "marker": "^", "linestyle": "--"},
+    ("tcn", "gaussian"):   {"color": "#E69F00", "marker": "s", "linestyle": "-."},
+    ("tcn", "students_t"): {"color": "#D55E00", "marker": "D", "linestyle": ":"},
+    ("lru", "none"):       {"color": "#009E73", "marker": "p", "linestyle": "--"},
+    ("lru", "gaussian"):   {"color": "#CC79A7", "marker": "X", "linestyle": "-."},
+    ("lru", "students_t"): {"color": "#56B4E9", "marker": "v", "linestyle": ":"},
 }
 _FALLBACK_STYLES = [
-    {"color": _CMAP(0.5), "marker": "p", "linestyle": "-"},
-    {"color": _CMAP(0.2), "marker": "X", "linestyle": "--"},
+    {"color": "#F0E442", "marker": "*", "linestyle": "-"},
+    {"color": "#000000", "marker": "+", "linestyle": "--"},
 ]
 _extra_style_cache: dict[tuple, dict] = {}
 
@@ -116,8 +124,8 @@ def _get_style(model: str, dist: str) -> dict:
     if key in MODEL_STYLES:
         return MODEL_STYLES[key]
     if key not in _extra_style_cache:
-        idx = len(_extra_style_cache) % len(_FALLBACK_STYLES)
-        _extra_style_cache[key] = _FALLBACK_STYLES[idx]
+        style_index = len(_extra_style_cache) % len(_FALLBACK_STYLES)
+        _extra_style_cache[key] = _FALLBACK_STYLES[style_index]
     return _extra_style_cache[key]
 
 
@@ -129,19 +137,18 @@ def _resolve(p: str | Path) -> Path:
     return p if p.is_absolute() else REPO_ROOT / p
 
 
-# ─── DATA HELPERS ───────────────────────────────────────────────────────────────
-
+# DATA HELPERS
 def _read_jsonl(path: Path):
-    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def load_channel_runs(channel_exp_dir: str) -> list[dict]:
     """Load runs.jsonl from a channel-model grid search and annotate with is_prob."""
     rows = _read_jsonl(_resolve(channel_exp_dir) / "runs.jsonl")
-    for r in rows:
-        dist = r.get("distribution") or "none"
-        r["is_tcn"]  = r.get("model") == "tcn"
-        r["is_prob"] = r["is_tcn"] and dist in ("gaussian", "students_t")
+    for row in rows:
+        distribution = row.get("distribution") or "none"
+        row["is_tcn"] = row.get("model") == "tcn"
+        row["is_prob"] = row["is_tcn"] and distribution in ("gaussian", "students_t")
     return rows
 
 
@@ -161,20 +168,20 @@ def load_dataset(dataset_path: str, device: str = DEVICE):
     """
     root = zarr.open_group(_resolve(dataset_path), mode="r")
     attrs = dict(root.attrs)
-    ks_indices = np.array(attrs["active_carrier_indices"])
-    cp_length  = int(attrs["cyclic_prefix_length"])
+    active_carrier_indices = np.array(attrs["active_carrier_indices"])
+    cyclic_prefix_length = int(attrs["cyclic_prefix_length"])
 
     if "sent_burst" in root:
         preamble_length = int(attrs.get("preamble_length", 0))
-        burst = torch.tensor(root["sent_burst"][:], dtype=torch.float32, device=device)
-        recv  = torch.tensor(root["received_burst"][:], dtype=torch.float32, device=device)
-        offset = preamble_length + cp_length
-        X, Y = burst[:, offset:], recv[:, offset:]
+        sent_burst = torch.tensor(root["sent_burst"][:], dtype=torch.float32, device=device)
+        received_burst = torch.tensor(root["received_burst"][:], dtype=torch.float32, device=device)
+        symbol_offset = preamble_length + cyclic_prefix_length
+        X, Y = sent_burst[:, symbol_offset:], received_burst[:, symbol_offset:]
     else:
         X = torch.tensor(root["sent_baseband"][:], dtype=torch.float32, device=device)
         Y = torch.tensor(root["received_baseband"][:], dtype=torch.float32, device=device)
 
-    return X, Y, ks_indices, X.shape[1]
+    return X, Y, active_carrier_indices, X.shape[1]
 
 
 def _predict_mean(adapter, X: torch.Tensor) -> torch.Tensor:
@@ -183,13 +190,14 @@ def _predict_mean(adapter, X: torch.Tensor) -> torch.Tensor:
     return out[1] if isinstance(out, tuple) else out
 
 
-def _best_by(runs: list[dict], key: str, fallback_key: str | None = None) -> dict | None:
-    """Return the run with the minimum value for key (or fallback_key)."""
+def _best_by(runs: list[dict], key: str, *fallback_keys: str) -> dict | None:
+    """Return the run with the minimum value for key, trying fallback_keys in
+    order (legacy metric names from older experiments) when key is absent."""
     def score(r):
-        v = r.get(key)
-        if v is None and fallback_key:
-            v = r.get(fallback_key)
-        return float("inf") if v is None else float(v)
+        for k in (key, *fallback_keys):
+            if r.get(k) is not None:
+                return float(r[k])
+        return float("inf")
     return min(runs, key=score, default=None)
 
 
@@ -202,20 +210,21 @@ def per_trial_evm(ed_val_exp_dir: str, ks_indices: np.ndarray) -> dict[str, np.n
     rfft directly and index by ks_indices.
     """
     root = zarr.open_group(_resolve(ed_val_exp_dir) / "validation.zarr", mode="r")
-    result = {}
-    for key in root.keys():
-        g = root[key]
-        sent = g["sent_time"][:]     # (num_trials, N_sym)
-        recv = g["received_time"][:]
-        evms = []
-        for i in range(sent.shape[0]):
-            sf = np.fft.rfft(sent[i], norm="ortho")[ks_indices]
-            rf = np.fft.rfft(recv[i],  norm="ortho")[ks_indices]
-            sig_pwr = np.mean(np.abs(sf) ** 2)
-            mse     = np.mean(np.abs(sf - rf) ** 2)
-            evms.append(float(np.sqrt(mse / (sig_pwr + 1e-12)) * 100))
-        result[key] = np.array(evms)
-    return result
+    evm_by_run = {}
+    for run_id in root.keys():
+        group = root[run_id]
+        sent = group["sent_time"][:]     # (num_trials, symbol_length)
+        received = group["received_time"][:]
+
+        trial_evms = []
+        for trial in range(sent.shape[0]):
+            sent_spectrum = np.fft.rfft(sent[trial], norm="ortho")[ks_indices]
+            received_spectrum = np.fft.rfft(received[trial], norm="ortho")[ks_indices]
+            signal_power = np.mean(np.abs(sent_spectrum) ** 2)
+            residual_power = np.mean(np.abs(sent_spectrum - received_spectrum) ** 2)
+            trial_evms.append(float(np.sqrt(residual_power / (signal_power + 1e-12)) * 100))
+        evm_by_run[run_id] = np.array(trial_evms)
+    return evm_by_run
 
 
 def _binned_rrmse(
@@ -224,27 +233,27 @@ def _binned_rrmse(
     adapter,
     n_bins: int = N_POWER_BINS,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute per-bin RRMSE (%) binned by sent-power (mean squared amplitude)."""
-    pwr = X.square().mean(dim=-1)
-    bins = torch.linspace(pwr.min(), pwr.max(), n_bins + 1)
-    bin_ids = torch.bucketize(pwr, bins)
-    centers = (0.5 * (bins[:-1] + bins[1:])).cpu().numpy()
+    """Compute per-bin per-burst RRMSE (%) binned by sent-power (mean squared amplitude)."""
+    power = X.square().mean(dim=-1)
+    bin_edges = torch.linspace(power.min(), power.max(), n_bins + 1)
+    bin_index = torch.bucketize(power, bin_edges)
+    bin_centers = (0.5 * (bin_edges[:-1] + bin_edges[1:])).cpu().numpy()
 
-    Y_hat = _predict_mean(adapter, X)
-    rf = int(getattr(adapter.model, "receptive_field", 0))
-    Y_t, Y_hat = Y[..., rf:], Y_hat[..., rf:]
-    vals = []
-    for i in range(n_bins):
-        mask = bin_ids == i
-        if mask.any():
-            vals.append(float(calculate_rrmse_pct_loss(Y_t[mask], Y_hat[mask])))
+    predicted = _predict_mean(adapter, X)
+    receptive_field = int(getattr(adapter.model, "receptive_field", 0))
+    target, predicted = Y[..., receptive_field:], predicted[..., receptive_field:]
+
+    rrmse_per_bin = []
+    for bin_number in range(n_bins):
+        in_bin = bin_index == bin_number
+        if in_bin.any():
+            rrmse_per_bin.append(float(calculate_per_burst_rrmse_pct_loss(target[in_bin], predicted[in_bin])))
         else:
-            vals.append(float("nan"))
-    return centers, np.array(vals)
+            rrmse_per_bin.append(float("nan"))
+    return bin_centers, np.array(rrmse_per_bin)
 
 
-# ─── PLOT 1 & 2 shared helpers ──────────────────────────────────────────────────
-
+# PLOT 1 & 2 shared helpers
 def _model_type_label(model: str, dist: str) -> str:
     dist_name = {"none": "nonprob", "gaussian": "Gaussian", "students_t": "Student's-t"}.get(dist, dist)
     return f"{model.upper()} {dist_name}"
@@ -265,8 +274,8 @@ def _discover_model_types(run_configs: list[dict]) -> list[tuple[str, str]]:
     return sorted(seen, key=_model_type_sort_key)
 
 
-# ─── PLOT 1: Val RRMSE vs Sent Power – 2×2 subplot grid, one panel per DC bias ─
-# Model type → style from MODEL_STYLES (color/marker/linestyle), consistent across panels.
+# PLOT 1: Val RRMSE vs Sent Power - 2×2 subplot grid, one panel per DC bias
+# Model type -> style from MODEL_STYLES (color/marker/linestyle), consistent across panels.
 # Shared x/y axes so panels are directly comparable.
 
 _PANEL_LABELS = ["(a)", "(b)", "(c)", "(d)"]
@@ -280,8 +289,8 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
                              constrained_layout=True)
     axes_flat = axes.flatten()
 
-    for idx, cfg in enumerate(run_configs):
-        ax = axes_flat[idx]
+    for panel_index, cfg in enumerate(run_configs):
+        ax = axes_flat[panel_index]
         X, Y, _, _ = load_dataset(cfg["dataset_path"])
         runs = load_channel_runs(cfg["channel_exp_dir"])
 
@@ -291,7 +300,7 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
                           if r["model"] == model and (r.get("distribution") or "none") == dist]
             if not candidates:
                 continue
-            best    = _best_by(candidates, "val_rrmse_pct")
+            best    = _best_by(candidates, "val_per_burst_rrmse_pct", "val_rrmse_pct")
             adapter = load_adapter(best, cfg["channel_exp_dir"])
             centers, rrmse = _binned_rrmse(X, Y, adapter)
             mask = ~np.isnan(rrmse)
@@ -308,10 +317,10 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
 
         ax.set_title(cfg["label"], fontsize=_FONT)
         ax.grid(True)
-        ax.text(0.05, 0.95, _PANEL_LABELS[idx], transform=ax.transAxes,
+        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
         ax.tick_params(labelbottom=True)
-        if idx % 2 == 0:
+        if panel_index % 2 == 0:
             ax.set_ylabel("Val RRMSE (%)")
         ax.set_xlabel("Sent Power (Mean Squared Amplitude)")
 
@@ -325,7 +334,7 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
     plt.show()
 
 
-# ─── PLOT 2: Pareto – channel model params vs experimental EVM% ────────────────
+# PLOT 2: Pareto - channel model params vs experimental EVM%
 # 2×2 subplot grid, one panel per DC bias (mirrors plot 1).
 # One trace per (model, distribution) type using MODEL_STYLES.
 # Lines connect points ordered by param count; error bars = 2× SE (≈ 95% CI).
@@ -338,61 +347,70 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
                              constrained_layout=True)
     axes_flat = axes.flatten()
 
-    for idx, cfg in enumerate(run_configs):
-        ax = axes_flat[idx]
-        _, _, ks, _ = load_dataset(cfg["dataset_path"])
-        ch_map   = {r["run_id"]: r for r in load_channel_runs(cfg["channel_exp_dir"])}
-        val_runs = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
-        t_evms   = per_trial_evm(cfg["ed_val_exp_dir"], ks)
+    for panel_index, cfg in enumerate(run_configs):
+        ax = axes_flat[panel_index]
+        _, _, active_carrier_indices, _ = load_dataset(cfg["dataset_path"])
+        channel_by_run_id = {row["run_id"]: row for row in load_channel_runs(cfg["channel_exp_dir"])}
+        validation_rows = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
+        trial_evms = per_trial_evm(cfg["ed_val_exp_dir"], active_carrier_indices)
 
-        best_ed: dict[str, dict] = {}
-        for vr in val_runs:
-            ch_id = vr.get("channel_run_id")
-            if ch_id is None:
+        # per channel model, keep the lowest-mean-EVM E/D validated against it
+        best_ed_per_channel: dict[str, dict] = {}
+        for validation_row in validation_rows:
+            channel_run_id = validation_row.get("channel_run_id")
+            if channel_run_id is None:
                 continue
-            trials   = t_evms.get(vr["run_id"], np.array([vr.get("evm_pct", float("nan"))]))
+            trials = trial_evms.get(validation_row["run_id"], np.array([validation_row.get("evm_pct", float("nan"))]))
             mean_evm = float(np.nanmean(trials))
-            if ch_id not in best_ed or mean_evm < best_ed[ch_id]["mean_evm"]:
-                best_ed[ch_id] = {"mean_evm": mean_evm, "trials": trials,
-                                  "ch_run": ch_map.get(ch_id)}
+            if channel_run_id not in best_ed_per_channel or mean_evm < best_ed_per_channel[channel_run_id]["mean_evm"]:
+                best_ed_per_channel[channel_run_id] = {"mean_evm": mean_evm, "trials": trials,
+                                                       "channel_run": channel_by_run_id.get(channel_run_id)}
 
-        trace_data: dict[tuple, list] = {}
-        for ch_id, entry in best_ed.items():
-            ch_run = entry["ch_run"]
-            if ch_run is None:
+        traces: dict[tuple, list] = {}
+        for channel_run_id, entry in best_ed_per_channel.items():
+            channel_run = entry["channel_run"]
+            if channel_run is None:
                 continue
-            trials   = entry["trials"]
+            trials = entry["trials"]
             mean_evm = float(np.nanmean(trials))
-            se       = (float(np.nanstd(trials, ddof=1)) / np.sqrt(len(trials))
-                        if len(trials) > 1 else 0.0)
-            key = (ch_run.get("model", "unknown"), ch_run.get("distribution") or "none")
-            trace_data.setdefault(key, []).append({
-                "num_params": ch_run["num_params"],
-                "mean_evm":  mean_evm,
-                "se":        se,
+            standard_error = (float(np.nanstd(trials, ddof=1)) / np.sqrt(len(trials))
+                              if len(trials) > 1 else 0.0)
+            key = (channel_run.get("model", "unknown"), channel_run.get("distribution") or "none")
+            traces.setdefault(key, []).append({
+                "num_params": channel_run["num_params"],
+                "mean_evm": mean_evm,
+                "standard_error": standard_error,
             })
 
-        for key in sorted(trace_data.keys(), key=_model_type_sort_key):
+        for key in sorted(traces.keys(), key=_model_type_sort_key):
             model, dist = key
-            style  = _get_style(model, dist)
-            points = sorted(trace_data[key], key=lambda p: p["num_params"])
-            xs  = np.array([p["num_params"] for p in points], dtype=float)
-            ys  = np.array([p["mean_evm"]   for p in points])
-            ses = np.array([p["se"]         for p in points])
-            ax.plot(xs, ys, color=style["color"], linestyle=style["linestyle"],
-                    linewidth=1.0, zorder=1)
-            ax.errorbar(xs, ys, yerr=2 * ses,
+            style = _get_style(model, dist)
+            points = sorted(traces[key], key=lambda point: point["num_params"])
+            param_counts = np.array([point["num_params"] for point in points], dtype=float)
+            mean_evms = np.array([point["mean_evm"] for point in points])
+            standard_errors = np.array([point["standard_error"] for point in points])
+
+            # faint raw points; solid line tracks the pareto front (best EVM so far
+            # with increasing parameter count)
+            ax.errorbar(param_counts, mean_evms, yerr=2 * standard_errors,
                         color=style["color"], marker=style["marker"],
                         markersize=3, capsize=2, capthick=0.5,
-                        elinewidth=0.5, linestyle="none", zorder=2,
-                        label=_model_type_label(model, dist))
+                        elinewidth=0.5, linestyle="none", zorder=2, alpha=0.3)
+            pareto_evms = np.minimum.accumulate(mean_evms)
+            ax.plot(param_counts, pareto_evms, color=style["color"], linestyle="-",
+                    linewidth=1.2, alpha=0.85, zorder=3,
+                    drawstyle="steps-post", label=_model_type_label(model, dist))
+            on_front = mean_evms == pareto_evms
+            ax.plot(param_counts[on_front], mean_evms[on_front], linestyle="none",
+                    marker=style["marker"], markersize=3,
+                    color=style["color"], alpha=0.85, zorder=4)
 
         ax.set_title(cfg["label"], fontsize=_FONT)
         ax.grid(True)
-        ax.text(0.05, 0.95, _PANEL_LABELS[idx], transform=ax.transAxes,
+        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
         ax.tick_params(labelbottom=True)
-        if idx % 2 == 0:
+        if panel_index % 2 == 0:
             ax.set_ylabel("Experimental EVM (%)")
         ax.set_xlabel("Channel Model Parameter Count")
 
@@ -407,8 +425,189 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
     plt.show()
 
 
-# ─── PLOT 3: Q-Q plots for best prob TCN at each DC bias ───────────────────────
+# PLOT 2b: predicted vs actual actual EVM per validated E/D run
+# Predicted = the E/D's own training environment evaluated on the exact validation
+# bursts: encoder -> frozen channel model (noisy forward for prob models, so their
+# prediction includes the noise they model) -> decoder. A calibrated environment
+# puts runs on the y=x diagonal; deterministic environments predict optimistically.
 
+_ED_ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels")
+
+
+def _form_style(channel_form: str) -> dict:
+    form_to_key = {
+        "gmp": ("gmp", "none"),
+        "nonprob TCN": ("tcn", "none"),
+        "prob TCN": ("tcn", "gaussian"),
+        "nonprob LRU": ("lru", "none"),
+        "prob LRU": ("lru", "gaussian"),
+    }
+    return _get_style(*form_to_key.get(channel_form, (channel_form, "none")))
+
+
+def _replay_predicted_trial_evms(cfg) -> dict[str, np.ndarray]:
+    """Per validated run: predicted per-trial EVM% from replaying its validation
+    sent bursts through encoder -> frozen channel model -> decoder."""
+    from modules.models import TCN
+
+    root = zarr.open_group(_resolve(cfg["dataset_path"]), mode="r")
+    active_carrier_indices = np.array(root.attrs["active_carrier_indices"])
+    cyclic_prefix_length = int(root.attrs["cyclic_prefix_length"])
+    clip_threshold = 3.0
+
+    validation = zarr.open_group(_resolve(cfg["ed_val_exp_dir"]) / "validation.zarr", mode="r")
+    validation_rows = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
+    encoder_decoder_rows = {row["run_id"]: row for row in _read_jsonl(_resolve(cfg["ed_exp_dir"]) / "runs.jsonl")}
+    channel_by_run_id = {row["run_id"]: row for row in load_channel_runs(cfg["channel_exp_dir"])}
+
+    channel_cache: dict[str, object] = {}
+    predicted_evm = {}
+    for row in validation_rows:
+        run_id, ed_run_id, channel_run_id = row["run_id"], row["model"], row.get("channel_run_id")
+        if run_id not in validation or ed_run_id not in encoder_decoder_rows or channel_run_id not in channel_by_run_id:
+            continue
+
+        architecture = {key: encoder_decoder_rows[ed_run_id][key] for key in _ED_ARCH_KEYS}
+        encoder = TCN(**architecture).to(DEVICE)
+        decoder = TCN(**architecture).to(DEVICE)
+        checkpoint = torch.load(_resolve(cfg["ed_exp_dir"]) / "runs" / ed_run_id / "model.pt",
+                                map_location=DEVICE, weights_only=True)
+        encoder.load_state_dict(checkpoint["encoder"])
+        decoder.load_state_dict(checkpoint["decoder"])
+        encoder.eval()
+        decoder.eval()
+
+        if channel_run_id not in channel_cache:
+            channel_cache[channel_run_id] = load_adapter(channel_by_run_id[channel_run_id], cfg["channel_exp_dir"])
+        channel = channel_cache[channel_run_id]
+
+        symbol = torch.tensor(validation[run_id]["sent_time"][:].astype(np.float32), device=DEVICE)
+        symbol_length = symbol.shape[1]
+        burst = torch.hstack([symbol[:, -cyclic_prefix_length:], symbol])  # [CP | symbol]
+        with torch.no_grad():
+            encoded = encoder(burst).clamp(-clip_threshold, clip_threshold)
+            channel_output = channel.predict(encoded)
+            if isinstance(channel_output, tuple):   # prob: noisy forward
+                channel_output = channel_output[0]
+            decoded = decoder(channel_output)[:, -symbol_length:].cpu().numpy()
+
+        sent_spectrum = np.fft.fft(symbol.cpu().numpy().astype(np.float64), norm="ortho", axis=1)[:, active_carrier_indices]
+        decoded_spectrum = np.fft.fft(decoded.astype(np.float64), norm="ortho", axis=1)[:, active_carrier_indices]
+        signal_power = np.mean(np.abs(sent_spectrum) ** 2, axis=1)
+        predicted_evm[run_id] = np.sqrt(np.mean(np.abs(decoded_spectrum - sent_spectrum) ** 2, axis=1) / signal_power) * 100
+    return predicted_evm
+
+
+def plot_predicted_vs_actual_evm(run_configs: list[dict]) -> None:
+    n = len(run_configs)
+    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh),
+                             sharex=True, sharey=True, constrained_layout=True)
+    axes_flat = axes.flatten()
+
+    for panel_index, cfg in enumerate(run_configs):
+        ax = axes_flat[panel_index]
+        if "ed_exp_dir" not in cfg:
+            print(f"[predicted_vs_actual] {cfg['label']}: no ed_exp_dir; skipping")
+            continue
+        _, _, active_carrier_indices, _ = load_dataset(cfg["dataset_path"])
+        predicted = _replay_predicted_trial_evms(cfg)
+        actual = per_trial_evm(cfg["ed_val_exp_dir"], active_carrier_indices)
+        validation_rows = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
+
+        seen_forms = set()
+        axis_limits = [np.inf, -np.inf]
+        for row in validation_rows:
+            run_id, form = row["run_id"], row["channel_form"]
+            if run_id not in predicted or run_id not in actual:
+                continue
+            predicted_evm, actual_evm = float(np.nanmean(predicted[run_id])), float(np.nanmean(actual[run_id]))
+            style = _form_style(form)
+            ax.scatter([predicted_evm], [actual_evm], s=14, color=style["color"], marker=style["marker"],
+                       label=form if form not in seen_forms else None, zorder=3)
+            seen_forms.add(form)
+            axis_limits = [min(axis_limits[0], predicted_evm, actual_evm),
+                           max(axis_limits[1], predicted_evm, actual_evm)]
+
+        pad = 0.08 * (axis_limits[1] - axis_limits[0] + 1e-9)
+        lo, hi = axis_limits[0] - pad, axis_limits[1] + pad
+        ax.plot([lo, hi], [lo, hi], color="grey", ls="--", lw=0.8, zorder=1)
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(lo, hi)
+        ax.set_title(cfg["label"], fontsize=_FONT)
+        ax.grid(True)
+        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
+                fontsize=_FONT, va="top", ha="left")
+        ax.tick_params(labelbottom=True)
+        if panel_index % 2 == 0:
+            ax.set_ylabel("Actual EVM (%)")
+        ax.set_xlabel("Predicted EVM (%)")
+
+    axes_flat[0].legend(fontsize=_SMALL, handlelength=1.2, markerscale=0.9,
+                        labelspacing=0.3, borderpad=0.4)
+    for ax in axes_flat[n:]:
+        ax.set_visible(False)
+
+    plt.savefig(PLOT_PATH / "predicted_vs_actual_evm.svg", format="svg", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / "predicted_vs_actual_evm.png", bbox_inches="tight")
+    plt.show()
+
+
+# PLOT 2c: ECDF of actual EVM per channel form
+# P(hw EVM <= x) across validated E/D runs: "more likely to perform well" as a
+# literal CDF statement. A form whose curve sits up-and-left stochastically
+# dominates, even if another form owns the single best run.
+
+def plot_hw_evm_ecdf(run_configs: list[dict]) -> None:
+    n = len(run_configs)
+    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh),
+                             sharex=True, sharey=True, constrained_layout=True)
+    axes_flat = axes.flatten()
+
+    for panel_index, cfg in enumerate(run_configs):
+        ax = axes_flat[panel_index]
+        val_rows = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
+        by_form: dict[str, list[float]] = {}
+        for row in val_rows:
+            by_form.setdefault(row["channel_form"], []).append(float(row["evm_pct"]))
+
+        legend_handles = []
+        for form in sorted(by_form):
+            style = _form_style(form)
+            evms = np.sort(by_form[form])
+            quantiles = np.arange(1, len(evms) + 1) / len(evms)
+            ax.step(np.concatenate([[evms[0]], evms]),
+                    np.concatenate([[0.0], quantiles]),
+                    where="post", color=style["color"], lw=1.2)
+            ax.plot(evms, quantiles, linestyle="none", marker=style["marker"],
+                    color=style["color"], ms=3)
+            legend_handles.append(plt.Line2D(
+                [], [], color=style["color"], lw=1.2, marker=style["marker"],
+                markersize=3, label=f"{form} (n={len(evms)})"))
+
+        ax.set_title(cfg["label"], fontsize=_FONT)
+        ax.set_ylim(0, 1.02)
+        ax.grid(True)
+        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
+                fontsize=_FONT, va="top", ha="left")
+        ax.tick_params(labelbottom=True)
+        if panel_index % 2 == 0:
+            ax.set_ylabel("P(EVM ≤ x)")
+        ax.set_xlabel("EVM (%)")
+        if panel_index == 0:
+            first_panel_handles = legend_handles
+
+    axes_flat[0].legend(handles=first_panel_handles, fontsize=_SMALL,
+                        handlelength=1.6, labelspacing=0.3,
+                        borderpad=0.4, loc="lower right")
+    for ax in axes_flat[n:]:
+        ax.set_visible(False)
+
+    plt.savefig(PLOT_PATH / "hw_evm_ecdf.svg", format="svg", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / "hw_evm_ecdf.png", bbox_inches="tight")
+    plt.show()
+
+
+# PLOT 3: Q-Q plots for best prob TCN at each DC bias
 def plot_qq(run_configs: list[dict]) -> None:
     n = len(run_configs)
     ncols = min(n, 2)
@@ -424,8 +623,8 @@ def plot_qq(run_configs: list[dict]) -> None:
                  fontsize=_FONT)
     axes = np.array(axs_grid).flatten()
 
-    for idx, cfg in enumerate(run_configs):
-        ax = axes[idx]
+    for panel_index, cfg in enumerate(run_configs):
+        ax = axes[panel_index]
         runs = load_channel_runs(cfg["channel_exp_dir"])
         prob_runs = [r for r in runs if r["is_prob"]]
         if not prob_runs:
@@ -434,48 +633,48 @@ def plot_qq(run_configs: list[dict]) -> None:
             ax.set_visible(False)
             continue
 
-        best = _best_by(prob_runs, "val_nll")
+        best = _best_by(prob_runs, "val_per_burst_rrmse_pct")
         adapter = load_adapter(best, cfg["channel_exp_dir"])
         model = adapter.model
         model.eval()
 
         X, Y, _, _ = load_dataset(cfg["dataset_path"])
-        dev = next(model.parameters()).device
+        device = next(model.parameters()).device
         with torch.no_grad():
-            noisy, y_mean, y_std, nu = model(X.to(dev))
+            noisy, y_mean, y_std, nu = model(X.to(device))
 
-        r = ((Y.to(dev) - y_mean) / y_std)[:, model.receptive_field:].detach().cpu().numpy().flatten()
+        residuals = ((Y.to(device) - y_mean) / y_std)[:, model.receptive_field:].detach().cpu().numpy().flatten()
         nu_flat = nu[:, model.receptive_field:].detach().cpu().numpy().flatten()
 
-        if len(r) > MAX_QQ_SAMPLES:
-            sel = np.random.choice(len(r), MAX_QQ_SAMPLES, replace=False)
-            r, nu_flat = r[sel], nu_flat[sel]
+        if len(residuals) > MAX_QQ_SAMPLES:
+            sample_indices = np.random.choice(len(residuals), MAX_QQ_SAMPLES, replace=False)
+            residuals, nu_flat = residuals[sample_indices], nu_flat[sample_indices]
 
         is_gaussian = (best.get("distribution", "gaussian") == "gaussian")
 
         if not is_gaussian:
-            (osm, osr), _ = stats.probplot(r, dist="norm")
-            ax.plot(osm, osr, ".", color=cmap(0.9), markersize=1,
+            (theoretical_quantiles, sample_quantiles), _ = stats.probplot(residuals, dist="norm")
+            ax.plot(theoretical_quantiles, sample_quantiles, ".", color=cmap(0.9), markersize=1,
                     label="Assuming Gaussian", rasterized=True)
 
         if is_gaussian:
-            (osm, osr), _ = stats.probplot(r, dist="norm")
-            ax.plot(osm, osr, ".", color=cmap(0.5), markersize=1,
+            (theoretical_quantiles, sample_quantiles), _ = stats.probplot(residuals, dist="norm")
+            ax.plot(theoretical_quantiles, sample_quantiles, ".", color=cmap(0.5), markersize=1,
                     label="Gaussian Model", rasterized=True)
         else:
-            cdf_vals  = stats.t.cdf(r, df=nu_flat)
-            r_norm    = stats.norm.ppf(cdf_vals)
-            (osm, osr), _ = stats.probplot(r_norm, dist="norm")
-            ax.plot(osm, osr, ".", color=cmap(0.5), markersize=1,
+            normalized_cdf = stats.t.cdf(residuals, df=nu_flat)
+            normal_residuals = stats.norm.ppf(normalized_cdf)
+            (theoretical_quantiles, sample_quantiles), _ = stats.probplot(normal_residuals, dist="norm")
+            ax.plot(theoretical_quantiles, sample_quantiles, ".", color=cmap(0.5), markersize=1,
                     label="t to Normal Transform", rasterized=True)
 
         ax.plot([-4.5, 4.5], [-4.5, 4.5], "--", color=cmap(0.1), label="y=x Standard Normal")
         ax.set_xlim(-4.5, 4.5)
         ax.set_ylim(-4.5, 4.5)
         dist_label = "Gaussian" if is_gaussian else "Student's-t"
-        ax.set_title(f"{dist_label} TCN – {cfg['label']}", fontsize=_SMALL)
+        ax.set_title(f"{dist_label} TCN - {cfg['label']}", fontsize=_SMALL)
         ax.set_xlabel("Theoretical Quantiles", fontsize=_SMALL)
-        ax.set_ylabel("Sample Quantiles" if idx % ncols == 0 else "", fontsize=_SMALL)
+        ax.set_ylabel("Sample Quantiles" if panel_index % ncols == 0 else "", fontsize=_SMALL)
         ax.grid(True)
         ax.set_box_aspect(1)
         ax.legend(fontsize=_SMALL, handlelength=0.3, labelspacing=0.2)
@@ -488,8 +687,7 @@ def plot_qq(run_configs: list[dict]) -> None:
     plt.show()
 
 
-# ─── PLOT 4: TCN predicted response to a Gaussian wave packet (lowest DC bias) ──
-
+# PLOT 4: TCN predicted response to a Gaussian wave packet (lowest DC bias)
 def plot_packet_response(run_configs: list[dict]) -> None:
     cfg = min(run_configs, key=lambda c: c["dc_ma"])
 
@@ -498,78 +696,81 @@ def plot_packet_response(run_configs: list[dict]) -> None:
     if not prob_runs:
         print(f"[plot_packet_response] No prob TCN found for {cfg['label']}; skipping.")
         return
-    best = _best_by(prob_runs, "val_nll", fallback_key="val_rrmse_pct")
+    best = _best_by(prob_runs, "val_per_burst_rrmse_pct", "val_rrmse_pct")
 
     adapter = load_adapter(best, cfg["channel_exp_dir"])
     model = adapter.model
     model.eval()
 
     # infer baseband sampling rate from dataset
-    root  = zarr.open_group(_resolve(cfg["dataset_path"]), mode="r")
+    root = zarr.open_group(_resolve(cfg["dataset_path"]), mode="r")
     attrs = dict(root.attrs)
-    ks    = np.array(attrs["active_carrier_indices"])
-    f_min = float(attrs.get("f_min_hz", 300e3))
-    spacing_hz = f_min / ks[0]   # e.g. 300e3 / 30 = 10 kHz
+    active_carrier_indices = np.array(attrs["active_carrier_indices"])
+    f_min_hz = float(attrs.get("f_min_hz", 300e3))
+    subcarrier_spacing_hz = f_min_hz / active_carrier_indices[0]   # e.g. 300e3 / 30 = 10 kHz
     if "sent_burst" in root:
-        preamble = int(attrs.get("preamble_length", 0))
-        cp       = int(attrs["cyclic_prefix_length"])
-        sym_len  = root["sent_burst"].shape[1] - preamble - cp
+        preamble_length = int(attrs.get("preamble_length", 0))
+        cyclic_prefix_length = int(attrs["cyclic_prefix_length"])
+        symbol_length = root["sent_burst"].shape[1] - preamble_length - cyclic_prefix_length
     else:
-        sym_len = root["sent_baseband"].shape[1]
-    fs = sym_len * spacing_hz   # baseband sampling rate in Hz
+        symbol_length = root["sent_baseband"].shape[1]
+    sample_rate_hz = symbol_length * subcarrier_spacing_hz
 
     # In-distribution test input: a Gaussian-shaped magnitude spectrum over the
     # active OFDM band (f_min..f_max), zero phase, with the +/-3 sigma points landing
     # on the band edges. Its IFFT is a smooth Gaussian wave packet that occupies the
     # same band the channel model was trained on, so it stays fully in-distribution.
-    rf = int(model.receptive_field)
-    carriers = np.arange(sym_len // 2 + 1)
-    k_lo, k_hi = int(ks.min()), int(ks.max())
-    k_c   = 0.5 * (k_lo + k_hi)          # band-centre carrier
-    sig_k = (k_hi - k_lo) / 6.0          # 3 sigma reaches each band edge
-    in_band = (carriers >= k_lo) & (carriers <= k_hi)
-    spectrum = np.zeros(sym_len // 2 + 1, dtype=complex)
-    spectrum[in_band] = np.exp(-0.5 * ((carriers[in_band] - k_c) / sig_k) ** 2)
-    packet = np.fft.irfft(spectrum, n=sym_len)
-    packet = np.roll(packet, sym_len // 2)          # centre the packet within each period
-    packet *= 3.0 / np.abs(packet).max()            # scale peak to the +/-3 training range
+    receptive_field = int(model.receptive_field)
+    carriers = np.arange(symbol_length // 2 + 1)
+    first_carrier, last_carrier = int(active_carrier_indices.min()), int(active_carrier_indices.max())
+    center_carrier = 0.5 * (first_carrier + last_carrier)
+    carrier_sigma = (last_carrier - first_carrier) / 6.0   # 3 sigma reaches each band edge
+    in_band = (carriers >= first_carrier) & (carriers <= last_carrier)
+    packet_spectrum = np.zeros(symbol_length // 2 + 1, dtype=complex)
+    packet_spectrum[in_band] = np.exp(-0.5 * ((carriers[in_band] - center_carrier) / carrier_sigma) ** 2)
+    packet = np.fft.irfft(packet_spectrum, n=symbol_length)
+    packet = np.roll(packet, symbol_length // 2)   # centre the packet within each period
+    packet *= 3.0 / np.abs(packet).max()           # scale peak to the +/-3 training range
 
-    reps      = max(1, int(np.ceil(rf / sym_len))) + 2   # enough periods for full RF context
-    n_samples = reps * sym_len
-    x_in = torch.tensor(np.tile(packet, reps), dtype=torch.float32).unsqueeze(0)
+    repetitions = max(1, int(np.ceil(receptive_field / symbol_length))) + 2   # enough periods for full RF context
+    num_samples = repetitions * symbol_length
+    packet_input = torch.tensor(np.tile(packet, repetitions), dtype=torch.float32).unsqueeze(0)
 
-    dev = next(model.parameters()).device
+    device = next(model.parameters()).device
     with torch.no_grad():
-        _, mean, std, nu = model(x_in.to(dev))
+        _, mean, std, nu = model(packet_input.to(device))
 
     # zoom to a window around one packet (past the receptive field), packet centre at t=0
-    ns_per_sample = 1e9 / fs
-    r0     = max(1, int(np.ceil(rf / sym_len)))
-    centre = r0 * sym_len + sym_len // 2
-    sig_t  = sym_len / (2 * np.pi * sig_k)      # packet envelope width in samples
-    half_w = int(np.ceil(6 * sig_t))            # +/-6 sigma around the packet
-    sl, sr = centre - half_w, centre + half_w
-    t_ns = (np.arange(n_samples) - centre) * ns_per_sample
+    ns_per_sample = 1e9 / sample_rate_hz
+    context_periods = max(1, int(np.ceil(receptive_field / symbol_length)))
+    center = context_periods * symbol_length + symbol_length // 2
+    envelope_width_samples = symbol_length / (2 * np.pi * carrier_sigma)
+    half_window = int(np.ceil(6 * envelope_width_samples))   # +/-6 sigma around the packet
+    window_start, window_end = center - half_window, center + half_window
+    time_ns = (np.arange(num_samples) - center) * ns_per_sample
 
-    mean_np = mean.squeeze(0).cpu().numpy()
-    std_np  = std.squeeze(0).cpu().numpy()
-    nu_np   = nu.squeeze(0).cpu().numpy()
-    x_np    = x_in.squeeze(0).numpy()
+    predicted_mean = mean.squeeze(0).cpu().numpy()
+    predicted_std = std.squeeze(0).cpu().numpy()
+    predicted_nu = nu.squeeze(0).cpu().numpy()
+    input_signal = packet_input.squeeze(0).numpy()
     is_gaussian = best.get("distribution", "gaussian") == "gaussian"
 
     cmap = _CMAP
     fig, ax1 = plt.subplots(figsize=(_fw, _fh))
 
     if not is_gaussian:
-        lo, hi = stats.t.interval(0.997, nu_np[sl:sr], loc=mean_np[sl:sr], scale=std_np[sl:sr])
-        ax1.fill_between(t_ns[sl:sr], lo, hi, color=cmap(0.9), alpha=0.8,
+        lo, hi = stats.t.interval(0.997, predicted_nu[window_start:window_end],
+                                  loc=predicted_mean[window_start:window_end],
+                                  scale=predicted_std[window_start:window_end])
+        ax1.fill_between(time_ns[window_start:window_end], lo, hi, color=cmap(0.9), alpha=0.8,
                          label="99.7% CI Student's-t")
 
-    ax1.fill_between(t_ns[sl:sr],
-                     mean_np[sl:sr] - 3 * std_np[sl:sr],
-                     mean_np[sl:sr] + 3 * std_np[sl:sr],
+    ax1.fill_between(time_ns[window_start:window_end],
+                     predicted_mean[window_start:window_end] - 3 * predicted_std[window_start:window_end],
+                     predicted_mean[window_start:window_end] + 3 * predicted_std[window_start:window_end],
                      color=cmap(0.5), alpha=0.8, label="±3 Std Dev")
-    ax1.plot(t_ns[sl:sr], mean_np[sl:sr], color=cmap(0.1), label="Predicted Mean")
+    ax1.plot(time_ns[window_start:window_end], predicted_mean[window_start:window_end],
+             color=cmap(0.1), label="Predicted Mean")
 
     ax1.set_xlabel("Time (ns)")
     ax1.set_ylabel("Predicted Received Amplitude", color=cmap(0.1))
@@ -581,15 +782,16 @@ def plot_packet_response(run_configs: list[dict]) -> None:
     ax2 = ax1.twinx()
     ax2.set_zorder(0)
     ax2.grid(True, alpha=0.3)
-    ax2.plot(t_ns[sl:sr], x_np[sl:sr], "--", color="black", alpha=0.8, label="Input Signal")
+    ax2.plot(time_ns[window_start:window_end], input_signal[window_start:window_end], "--",
+             color="black", alpha=0.8, label="Input Signal")
     ax2.set_ylabel("Input Signal Amplitude", color="black")
     ax2.tick_params(axis="y", labelcolor="black")
 
-    h1, l1 = ax1.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=_SMALL,
-               frameon=True, framealpha=1)
-    ax1.set_title(f"TCN Response – Gaussian Wave Packet – {cfg['label']}",
+    left_handles, left_labels = ax1.get_legend_handles_labels()
+    right_handles, right_labels = ax2.get_legend_handles_labels()
+    ax1.legend(left_handles + right_handles, left_labels + right_labels, loc="upper right",
+               fontsize=_SMALL, frameon=True, framealpha=1)
+    ax1.set_title(f"TCN Response - Gaussian Wave Packet - {cfg['label']}",
                   fontsize=_FONT)
 
     plt.tight_layout()
@@ -598,8 +800,78 @@ def plot_packet_response(run_configs: list[dict]) -> None:
     plt.show()
 
 
-# ─── PLOT 5/6: EVM% (and SNR dB) vs frequency from the fixed preamble ──────────
+# PLOT 4b: best prob TCN's predicted noise std vs input power (one line per DC bias)
 
+def plot_predicted_std_vs_power(run_configs: list[dict],
+                                power_levels=None,
+                                num_bursts: int = 256) -> None:
+    """For each DC bias, take the best prob TCN channel model and plot its mean
+    predicted noise std against input drive power. Test inputs are band-limited
+    Gaussian bursts (random spectrum on the active OFDM carriers), matching the
+    training waveform statistics, rescaled to each target power. The dataset's
+    actual training power range is shaded so extrapolation is visible."""
+    if power_levels is None:
+        power_levels = np.linspace(0.05, 1.5, 15)
+
+    fig, ax = plt.subplots(figsize=(_fw, _fh))
+    markers = ["o", "^", "s", "D"]
+    colors = [_CMAP(x) for x in np.linspace(0.1, 0.8, max(len(run_configs), 2))]
+
+    for config_index, cfg in enumerate(run_configs):
+        runs = load_channel_runs(cfg["channel_exp_dir"])
+        prob_runs = [r for r in runs if r["is_prob"]]
+        if not prob_runs:
+            print(f"[plot_predicted_std_vs_power] No prob TCN found for {cfg['label']}; skipping.")
+            continue
+        best = _best_by(prob_runs, "val_per_burst_rrmse_pct", "val_rrmse_pct")
+
+        adapter = load_adapter(best, cfg["channel_exp_dir"])
+        model = adapter.model
+        model.eval()
+        device = next(model.parameters()).device
+        receptive_field = int(model.receptive_field)
+
+        X, _, active_carrier_indices, symbol_length = load_dataset(cfg["dataset_path"])
+        training_power = X.square().mean(dim=-1)
+        training_min = float(training_power.min())
+        training_max = float(training_power.max())
+
+        # band-limited Gaussian bursts: random complex spectrum on the active carriers
+        rng = np.random.default_rng(0)
+        half_spectrum = np.zeros((num_bursts, symbol_length // 2 + 1), dtype=complex)
+        half_spectrum[:, active_carrier_indices] = (
+            rng.standard_normal((num_bursts, len(active_carrier_indices)))
+            + 1j * rng.standard_normal((num_bursts, len(active_carrier_indices))))
+        bursts = np.fft.irfft(half_spectrum, n=symbol_length, norm="ortho")
+        bursts /= np.sqrt((bursts ** 2).mean(axis=-1, keepdims=True))
+
+        mean_std_per_power = []
+        for target_power in power_levels:
+            scaled = torch.tensor(bursts * np.sqrt(target_power), dtype=torch.float32, device=device)
+            with torch.no_grad():
+                _, _, predicted_std, _ = model(scaled)
+            mean_std_per_power.append(predicted_std[:, receptive_field:].mean().item())
+
+        ax.plot(power_levels, mean_std_per_power,
+                color=colors[config_index], marker=markers[config_index % len(markers)],
+                markersize=2.5, label=f"{cfg['label']} ({best['run_id']})")
+        if config_index == 0:
+            ax.axvspan(training_min, training_max, color="grey", alpha=0.12,
+                       label="training power range")
+
+    ax.set_xlabel("Input Power (Mean Squared Amplitude)")
+    ax.set_ylabel("Mean Predicted Noise Std")
+    ax.set_title("Best Prob TCN: Learned Noise Std vs Drive Power", fontsize=_FONT)
+    ax.grid(True)
+    ax.legend(fontsize=_SMALL, handlelength=2, labelspacing=0.4)
+
+    plt.tight_layout()
+    plt.savefig(PLOT_PATH / "predicted_std_vs_power.svg", format="svg", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / "predicted_std_vs_power.png", bbox_inches="tight")
+    plt.show()
+
+
+# PLOT 5/6: EVM% (and SNR dB) vs frequency from the fixed preamble
 def evm_percent_to_snr_db(evm_percent):
     evm_fraction = np.asarray(evm_percent) / 100.0
     return -20.0 * np.log10(evm_fraction + 1e-12)
@@ -662,7 +934,7 @@ def best_probabilistic_channel_runs(channel_exp_dir):
     selected_runs = []
     for model_name in dict.fromkeys(run["model"] for run in probabilistic_runs):
         architecture_runs = [run for run in probabilistic_runs if run["model"] == model_name]
-        best_run = _best_by(architecture_runs, "val_nll", "val_rrmse_pct")
+        best_run = _best_by(architecture_runs, "val_nll", "val_per_burst_rrmse_pct")
         selected_runs.append((model_name, best_run.get("distribution") or "none", best_run))
     selected_runs.sort(key=lambda selected: _model_type_sort_key((selected[0], selected[1])))
     return selected_runs
@@ -760,8 +1032,7 @@ def plot_preamble_residual_evm_vs_frequency(run_configs):
     plt.show()
 
 
-# ─── PLOT 7: EVM% vs frequency from empirical E/D validation waveforms ─────────
-
+# PLOT 7: EVM% vs frequency from empirical E/D validation waveforms
 def subcarrier_frequencies_mhz(dataset_path, active_carrier_indices):
     attrs = dict(zarr.open_group(_resolve(dataset_path), mode="r").attrs)
     subcarrier_spacing_hz = float(attrs["f_min_hz"]) / active_carrier_indices[0]
@@ -827,8 +1098,7 @@ def plot_validation_evm_vs_frequency(run_configs):
     plt.show()
 
 
-# ─── GMP ERR: term ranking for the best GMP model at each DC bias ───────────────
-
+# GMP ERR: term ranking for the best GMP model at each DC bias
 def print_best_gmp_err(run_configs: list[dict]) -> None:
     """Grab the best-performing GMP channel model (lowest val RRMSE) at each DC bias
     and print its error-reduction-ratio (ERR) term ranking + linear/nonlinear split."""
@@ -837,10 +1107,12 @@ def print_best_gmp_err(run_configs: list[dict]) -> None:
         if not gmp_runs:
             print(f"\n[{cfg['label']}] no GMP model found; skipping ERR.")
             continue
-        best = _best_by(gmp_runs, "val_rrmse_pct", fallback_key="rrmse_pct")
-        score = best.get("val_rrmse_pct", best.get("rrmse_pct"))
+        best = _best_by(gmp_runs, "val_per_burst_rrmse_pct", "val_rrmse_pct",
+                        "per_burst_rrmse_pct", "rrmse_pct")
+        score = next(best[k] for k in ("val_per_burst_rrmse_pct", "val_rrmse_pct",
+                                       "per_burst_rrmse_pct", "rrmse_pct") if best.get(k) is not None)
         print("\n" + "=" * 50)
-        print(f"GMP ERR — {cfg['label']}  (run {best['run_id']}, val RRMSE {score:.2f}%)")
+        print(f"GMP ERR - {cfg['label']}  (run {best['run_id']}, val RRMSE {score:.2f}%)")
         try:
             adapter = load_adapter(best, cfg["channel_exp_dir"])
             X, Y, _, _ = load_dataset(cfg["dataset_path"])
@@ -849,36 +1121,45 @@ def print_best_gmp_err(run_configs: list[dict]) -> None:
             print(f"  ERR calculation failed: {e}")
 
 
-# ─── MAIN ────────────────────────────────────────────────────────────────────────
+# MAIN
 if __name__ == "__main__":
     PLOT_PATH.mkdir(parents=True, exist_ok=True)
     run_configs = sorted(RUN_CONFIGS, key=lambda c: c["dc_ma"])
 
-    print("Plot 1 – Val RRMSE vs Sent Power ...")
+    print("Plot 1 - Val RRMSE vs Sent Power ...")
     plot_val_rrmse_vs_power(run_configs)
 
-    print("Plot 2 – Pareto: channel params vs experimental EVM% ...")
+    print("Plot 2 - Pareto: channel params vs experimental EVM% ...")
     plot_pareto_evm(run_configs)
 
-    print("Plot 3 – Q-Q plots for best prob TCN ...")
+    print("Plot 2b - Predicted vs actual actual EVM ...")
+    plot_predicted_vs_actual_evm(run_configs)
+
+    print("Plot 2c - ECDF of actual EVM per channel form ...")
+    plot_hw_evm_ecdf(run_configs)
+
+    print("Plot 3 - Q-Q plots for best prob TCN ...")
     plot_qq(run_configs)
 
-    print("Plot 4 – Gaussian wave packet TCN response ...")
+    print("Plot 4 - Gaussian wave packet TCN response ...")
     plot_packet_response(run_configs)
 
-    print("Plot 5 – Preamble EVM% vs frequency ...")
+    print("Plot 4b - Prob TCN learned noise std vs drive power ...")
+    plot_predicted_std_vs_power(run_configs)
+
+    print("Plot 5 - Preamble EVM% vs frequency ...")
     plot_preamble_evm_vs_frequency(run_configs)
 
-    print("Plot 6 – Preamble SNR (dB) vs frequency ...")
+    print("Plot 6 - Preamble SNR (dB) vs frequency ...")
     plot_preamble_evm_vs_frequency(run_configs, as_snr_db=True)
 
-    print("Plot 6b – Preamble residual EVM% (measured - predicted) vs frequency ...")
+    print("Plot 6b - Preamble residual EVM% (measured - predicted) vs frequency ...")
     plot_preamble_residual_evm_vs_frequency(run_configs)
 
-    print("Plot 7 – E/D validation EVM% vs frequency ...")
+    print("Plot 7 - E/D validation EVM% vs frequency ...")
     plot_validation_evm_vs_frequency(run_configs)
 
-    print("\nBest GMP ERR term ranking per DC bias ...")
-    print_best_gmp_err(run_configs)
+    # print("\nBest GMP ERR term ranking per DC bias ...")
+    # print_best_gmp_err(run_configs)
 
     print(f"\nDone. Figures saved to {PLOT_PATH}/")

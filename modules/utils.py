@@ -70,10 +70,12 @@ def symbols_to_time(X,
         x_time = torch.clip(x_time, min=negative_rail, max=positive_rail)
         return x_time.to(device)
 
-def calculate_rrmse_pct_loss(y, y_pred):
+def calculate_per_burst_rrmse_pct_loss(y, y_pred):
+    '''each burst's error is normalized by that burst's own
+    power before averaging, so every drive power counts equally'''
     r = y - y_pred
-    x = torch.mean(torch.abs(r) ** 2) / torch.mean(torch.abs(y) ** 2)
-    return (torch.sqrt(x) * 100).item()
+    per_burst = torch.mean(torch.abs(r) ** 2, dim=-1) / torch.mean(torch.abs(y) ** 2, dim=-1)
+    return (torch.sqrt(per_burst).mean() * 100).item()
 
 def load_ofdm_dataset(file_path, device):
     '''Read an AppendToDataset zarr group into (sent, received, OFDMConfig).
