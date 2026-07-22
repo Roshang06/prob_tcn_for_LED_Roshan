@@ -38,10 +38,10 @@ RUN_CONFIGS = [
     {
         "label": "50 mA",
         "dc_ma": 50,
-        "channel_exp_dir": "data/experiments/train_and_validate/dawn_fold_channel_models_20260714_1613",
-        "ed_exp_dir":      "data/experiments/train_and_validate/dawn_fold_encoder_decoder_20260714_2242",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/dawn_fold_ed_validation_20260714_2326",
-        "dataset_path":    "data/sweeps/tall_river_dc0.05A_fmin300000_fmax7.6e+06_20260713_1711.zarr",
+        "channel_exp_dir": "data/experiments/train_and_validate/fresh_echo_channel_models_20260716_1726",
+        "ed_exp_dir":      "data/experiments/train_and_validate/fresh_echo_encoder_decoder_20260717_0644",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/fresh_echo_ed_validation_20260717_0751",
+        "dataset_path":    "data/sweeps/fresh_echo_dc0.05A_fmin1e+06_fmax7.6e+06_20260715_1828.zarr",
     },
     # add more DC offsets here, e.g.:
     # {
