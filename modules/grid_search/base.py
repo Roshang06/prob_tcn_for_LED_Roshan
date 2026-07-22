@@ -208,6 +208,30 @@ class GridSearchBase:
             w.writeheader()
             w.writerows(rows)
 
+        # md table
+        rows.sort(key=lambda r: r.get("rrmse_pct", float("inf")))
+        with open(self.summary_dir / "tableRanking.md", "w") as file:
+            file.write("\n" + "| ")
+            for header in cols:
+                file.write(header + " | ")
+            file.write("\n" + "| " + ("--- | ")*len(cols) + "\n")
+
+            for row in rows:
+                values = [str(row.get(header, "")) for header in cols]
+                file.write("| " + " | ".join(values) + " |\n")
+
+            file.write("\n\nShortened:\n\n")
+
+            file.write("\n" + "| ")
+            for header in cols:
+                file.write(header[:3] + " | ")
+            file.write("\n" + "| " + ("--- | ")*len(cols) + "\n")
+
+            for row in rows:
+                values = [str(row.get(header, "")) for header in cols]
+                file.write("| " + " | ".join(values) + " |\n")
+
+
     # ------------------------------------------------------------- subclass hooks
     def _prepare(self, **kwargs):
         '''Load whatever data/models every grid point needs, once.'''

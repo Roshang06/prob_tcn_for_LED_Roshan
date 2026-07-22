@@ -1,6 +1,6 @@
 '''
 Synthetic end-to-end test of the channel model and encoder/decoder grid searches.
-No hardware, no zarr dataset - all data is generated here.
+No hardware, no zarr dataset — all data is generated here.  
 
 Run from the repo root:
     python experiments/test_gridsearch.py
@@ -60,7 +60,7 @@ class _CaptureStub(FunctionalBlock):
 
 # Experiment output
 EXP_DIR   = Path("data/experiments/test_gridsearch")
-DEVICE    = "cpu"
+DEVICE    = "cuda"
 SEED      = 42
 
 # Synthetic OFDM geometry
@@ -98,6 +98,7 @@ def make_synthetic_dataset(n_frames: int = 64) -> tuple[torch.Tensor, torch.Tens
 
     sent_time = torch.stack(sent_time_frames).float()
     recv_time = fir_channel(sent_time)
+
     return sent_time, recv_time
 
 CHANNEL_GRID = {
@@ -110,7 +111,7 @@ CHANNEL_GRID = {
                 "dilation_base":    2,
                 "kernel_size":      10,
                 "hidden_channels":  [8, 16],
-                "learn_noise":      False,
+                "learn_noise":      True,
                 "gaussian":         True,
                 "epochs":           100,
                 "lr":               1e-3,
@@ -153,14 +154,15 @@ ENCODER_DECODER_GRID = {
     "constellation":      "qpsk",
     "preamble_amplitude": 3.0,
     "params": {
-        "nlayers":         [2],
+        "nlayers":         [2, 3],
         "dilation_base":   2,
         "kernel_size":     10,
-        "hidden_channels": 4,
+        "hidden_channels": [4, 8],
         "epochs":          1000,
         "lr":              1e-3,
         "weight_decay":    1e-5,
         "batch_size":      8,
+        "nonCausalPadding": 0
     },
 }
 
