@@ -57,6 +57,7 @@ PLOT_PATH       = Path(__file__).resolve().parent.parent / "data/plots"
 DEVICE          = "cpu"
 N_POWER_BINS    = 10       # bins for plot 1
 MAX_QQ_SAMPLES  = 10_000  # downsample for Q-Q speed
+SHOW_RUN_IN_TITLE = True  # append " (from <run_name>)" to every figure title
 # Style (matches make_figures.ipynb)
 _FONT = 7
 _SMALL = 5
@@ -135,6 +136,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 def _resolve(p: str | Path) -> Path:
     p = Path(p)
     return p if p.is_absolute() else REPO_ROOT / p
+
+
+def _run_name(cfg) -> str:
+    '''Experiment run name parsed from a config's directory basename, e.g.
+    "north_mast_ed_validation_20260722_0058" -> "north_mast".'''
+    for key in ("ed_val_exp_dir", "ed_exp_dir", "channel_exp_dir"):
+        path = cfg.get(key)
+        if not path:
+            continue
+        name = Path(path).name
+        for marker in ("_ed_validation", "_encoder_decoder", "_channel_models"):
+            name = name.split(marker)[0]
+        return name
+    return "?"
+
+
+def _run_suffix(cfg) -> str:
+    '''" (from <run_name>)" for figure titles when SHOW_RUN_IN_TITLE is set, else "".'''
+    return f" (from {_run_name(cfg)})" if SHOW_RUN_IN_TITLE else ""
 
 
 # DATA HELPERS
@@ -315,7 +335,7 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
                 label=_model_type_label(model, dist),
             )
 
-        ax.set_title(cfg["label"], fontsize=_FONT)
+        ax.set_title(cfg["label"] + _run_suffix(cfg), fontsize=_FONT)
         ax.grid(True)
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
@@ -405,7 +425,7 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
                     marker=style["marker"], markersize=3,
                     color=style["color"], alpha=0.85, zorder=4)
 
-        ax.set_title(cfg["label"], fontsize=_FONT)
+        ax.set_title(cfg["label"] + _run_suffix(cfg), fontsize=_FONT)
         ax.grid(True)
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
@@ -533,7 +553,7 @@ def plot_predicted_vs_actual_evm(run_configs: list[dict]) -> None:
         ax.plot([lo, hi], [lo, hi], color="grey", ls="--", lw=0.8, zorder=1)
         ax.set_xlim(lo, hi)
         ax.set_ylim(lo, hi)
-        ax.set_title(cfg["label"], fontsize=_FONT)
+        ax.set_title(cfg["label"] + _run_suffix(cfg), fontsize=_FONT)
         ax.grid(True)
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
@@ -557,134 +577,8 @@ def plot_predicted_vs_actual_evm(run_configs: list[dict]) -> None:
 # literal CDF statement. A form whose curve sits up-and-left stochastically
 # dominates, even if another form owns the single best run.
 
-def plot_hw_evm_ecdf(run_configs: list[dict]) -> None:
-    n = len(run_configs)
-    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh),
-                             sharex=True, sharey=True, constrained_layout=True)
-    axes_flat = axes.flatten()
-
-    for panel_index, cfg in enumerate(run_configs):
-        ax = axes_flat[panel_index]
-        val_rows = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
-        by_form: dict[str, list[float]] = {}
-        for row in val_rows:
-            by_form.setdefault(row["channel_form"], []).append(float(row["evm_pct"]))
-
-        legend_handles = []
-        for form in sorted(by_form):
-            style = _form_style(form)
-            evms = np.sort(by_form[form])
-            quantiles = np.arange(1, len(evms) + 1) / len(evms)
-            ax.step(np.concatenate([[evms[0]], evms]),
-                    np.concatenate([[0.0], quantiles]),
-                    where="post", color=style["color"], lw=1.2)
-            ax.plot(evms, quantiles, linestyle="none", marker=style["marker"],
-                    color=style["color"], ms=3)
-            legend_handles.append(plt.Line2D(
-                [], [], color=style["color"], lw=1.2, marker=style["marker"],
-                markersize=3, label=f"{form} (n={len(evms)})"))
-
-        ax.set_title(cfg["label"], fontsize=_FONT)
-        ax.set_ylim(0, 1.02)
-        ax.grid(True)
-        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
-                fontsize=_FONT, va="top", ha="left")
-        ax.tick_params(labelbottom=True)
-        if panel_index % 2 == 0:
-            ax.set_ylabel("P(EVM ≤ x)")
-        ax.set_xlabel("EVM (%)")
-        if panel_index == 0:
-            first_panel_handles = legend_handles
-
-    axes_flat[0].legend(handles=first_panel_handles, fontsize=_SMALL,
-                        handlelength=1.6, labelspacing=0.3,
-                        borderpad=0.4, loc="lower right")
-    for ax in axes_flat[n:]:
-        ax.set_visible(False)
-
-    plt.savefig(PLOT_PATH / "hw_evm_ecdf.svg", format="svg", bbox_inches="tight")
-    plt.savefig(PLOT_PATH / "hw_evm_ecdf.png", bbox_inches="tight")
-    plt.show()
-
 
 # PLOT 3: Q-Q plots for best prob TCN at each DC bias
-def plot_qq(run_configs: list[dict]) -> None:
-    n = len(run_configs)
-    ncols = min(n, 2)
-    nrows = (n + ncols - 1) // ncols
-    cmap  = _CMAP
-
-    fig, axs_grid = plt.subplots(
-        nrows, ncols,
-        figsize=(_fw2 if ncols > 1 else _fw, nrows * _fh),
-        constrained_layout=True,
-    )
-    fig.suptitle("Q-Q Plots of Standardized Residuals for Prob TCN Channel Models",
-                 fontsize=_FONT)
-    axes = np.array(axs_grid).flatten()
-
-    for panel_index, cfg in enumerate(run_configs):
-        ax = axes[panel_index]
-        runs = load_channel_runs(cfg["channel_exp_dir"])
-        prob_runs = [r for r in runs if r["is_prob"]]
-        if not prob_runs:
-            ax.text(0.5, 0.5, "No prob TCN found", transform=ax.transAxes,
-                    ha="center", va="center")
-            ax.set_visible(False)
-            continue
-
-        best = _best_by(prob_runs, "val_per_burst_rrmse_pct")
-        adapter = load_adapter(best, cfg["channel_exp_dir"])
-        model = adapter.model
-        model.eval()
-
-        X, Y, _, _ = load_dataset(cfg["dataset_path"])
-        device = next(model.parameters()).device
-        with torch.no_grad():
-            noisy, y_mean, y_std, nu = model(X.to(device))
-
-        residuals = ((Y.to(device) - y_mean) / y_std)[:, model.receptive_field:].detach().cpu().numpy().flatten()
-        nu_flat = nu[:, model.receptive_field:].detach().cpu().numpy().flatten()
-
-        if len(residuals) > MAX_QQ_SAMPLES:
-            sample_indices = np.random.choice(len(residuals), MAX_QQ_SAMPLES, replace=False)
-            residuals, nu_flat = residuals[sample_indices], nu_flat[sample_indices]
-
-        is_gaussian = (best.get("distribution", "gaussian") == "gaussian")
-
-        if not is_gaussian:
-            (theoretical_quantiles, sample_quantiles), _ = stats.probplot(residuals, dist="norm")
-            ax.plot(theoretical_quantiles, sample_quantiles, ".", color=cmap(0.9), markersize=1,
-                    label="Assuming Gaussian", rasterized=True)
-
-        if is_gaussian:
-            (theoretical_quantiles, sample_quantiles), _ = stats.probplot(residuals, dist="norm")
-            ax.plot(theoretical_quantiles, sample_quantiles, ".", color=cmap(0.5), markersize=1,
-                    label="Gaussian Model", rasterized=True)
-        else:
-            normalized_cdf = stats.t.cdf(residuals, df=nu_flat)
-            normal_residuals = stats.norm.ppf(normalized_cdf)
-            (theoretical_quantiles, sample_quantiles), _ = stats.probplot(normal_residuals, dist="norm")
-            ax.plot(theoretical_quantiles, sample_quantiles, ".", color=cmap(0.5), markersize=1,
-                    label="t to Normal Transform", rasterized=True)
-
-        ax.plot([-4.5, 4.5], [-4.5, 4.5], "--", color=cmap(0.1), label="y=x Standard Normal")
-        ax.set_xlim(-4.5, 4.5)
-        ax.set_ylim(-4.5, 4.5)
-        dist_label = "Gaussian" if is_gaussian else "Student's-t"
-        ax.set_title(f"{dist_label} TCN - {cfg['label']}", fontsize=_SMALL)
-        ax.set_xlabel("Theoretical Quantiles", fontsize=_SMALL)
-        ax.set_ylabel("Sample Quantiles" if panel_index % ncols == 0 else "", fontsize=_SMALL)
-        ax.grid(True)
-        ax.set_box_aspect(1)
-        ax.legend(fontsize=_SMALL, handlelength=0.3, labelspacing=0.2)
-
-    for ax in axes[n:]:
-        ax.set_visible(False)
-
-    plt.savefig(PLOT_PATH / "qq_prob_tcn.svg", format="svg", bbox_inches="tight")
-    plt.savefig(PLOT_PATH / "qq_prob_tcn.png", bbox_inches="tight")
-    plt.show()
 
 
 # PLOT 4: TCN predicted response to a Gaussian wave packet (lowest DC bias)
@@ -791,7 +685,7 @@ def plot_packet_response(run_configs: list[dict]) -> None:
     right_handles, right_labels = ax2.get_legend_handles_labels()
     ax1.legend(left_handles + right_handles, left_labels + right_labels, loc="upper right",
                fontsize=_SMALL, frameon=True, framealpha=1)
-    ax1.set_title(f"TCN Response - Gaussian Wave Packet - {cfg['label']}",
+    ax1.set_title(f"TCN Response - Gaussian Wave Packet - {cfg['label']}" + _run_suffix(cfg),
                   fontsize=_FONT)
 
     plt.tight_layout()
@@ -801,74 +695,6 @@ def plot_packet_response(run_configs: list[dict]) -> None:
 
 
 # PLOT 4b: best prob TCN's predicted noise std vs input power (one line per DC bias)
-
-def plot_predicted_std_vs_power(run_configs: list[dict],
-                                power_levels=None,
-                                num_bursts: int = 256) -> None:
-    """For each DC bias, take the best prob TCN channel model and plot its mean
-    predicted noise std against input drive power. Test inputs are band-limited
-    Gaussian bursts (random spectrum on the active OFDM carriers), matching the
-    training waveform statistics, rescaled to each target power. The dataset's
-    actual training power range is shaded so extrapolation is visible."""
-    if power_levels is None:
-        power_levels = np.linspace(0.05, 1.5, 15)
-
-    fig, ax = plt.subplots(figsize=(_fw, _fh))
-    markers = ["o", "^", "s", "D"]
-    colors = [_CMAP(x) for x in np.linspace(0.1, 0.8, max(len(run_configs), 2))]
-
-    for config_index, cfg in enumerate(run_configs):
-        runs = load_channel_runs(cfg["channel_exp_dir"])
-        prob_runs = [r for r in runs if r["is_prob"]]
-        if not prob_runs:
-            print(f"[plot_predicted_std_vs_power] No prob TCN found for {cfg['label']}; skipping.")
-            continue
-        best = _best_by(prob_runs, "val_per_burst_rrmse_pct", "val_rrmse_pct")
-
-        adapter = load_adapter(best, cfg["channel_exp_dir"])
-        model = adapter.model
-        model.eval()
-        device = next(model.parameters()).device
-        receptive_field = int(model.receptive_field)
-
-        X, _, active_carrier_indices, symbol_length = load_dataset(cfg["dataset_path"])
-        training_power = X.square().mean(dim=-1)
-        training_min = float(training_power.min())
-        training_max = float(training_power.max())
-
-        # band-limited Gaussian bursts: random complex spectrum on the active carriers
-        rng = np.random.default_rng(0)
-        half_spectrum = np.zeros((num_bursts, symbol_length // 2 + 1), dtype=complex)
-        half_spectrum[:, active_carrier_indices] = (
-            rng.standard_normal((num_bursts, len(active_carrier_indices)))
-            + 1j * rng.standard_normal((num_bursts, len(active_carrier_indices))))
-        bursts = np.fft.irfft(half_spectrum, n=symbol_length, norm="ortho")
-        bursts /= np.sqrt((bursts ** 2).mean(axis=-1, keepdims=True))
-
-        mean_std_per_power = []
-        for target_power in power_levels:
-            scaled = torch.tensor(bursts * np.sqrt(target_power), dtype=torch.float32, device=device)
-            with torch.no_grad():
-                _, _, predicted_std, _ = model(scaled)
-            mean_std_per_power.append(predicted_std[:, receptive_field:].mean().item())
-
-        ax.plot(power_levels, mean_std_per_power,
-                color=colors[config_index], marker=markers[config_index % len(markers)],
-                markersize=2.5, label=f"{cfg['label']} ({best['run_id']})")
-        if config_index == 0:
-            ax.axvspan(training_min, training_max, color="grey", alpha=0.12,
-                       label="training power range")
-
-    ax.set_xlabel("Input Power (Mean Squared Amplitude)")
-    ax.set_ylabel("Mean Predicted Noise Std")
-    ax.set_title("Best Prob TCN: Learned Noise Std vs Drive Power", fontsize=_FONT)
-    ax.grid(True)
-    ax.legend(fontsize=_SMALL, handlelength=2, labelspacing=0.4)
-
-    plt.tight_layout()
-    plt.savefig(PLOT_PATH / "predicted_std_vs_power.svg", format="svg", bbox_inches="tight")
-    plt.savefig(PLOT_PATH / "predicted_std_vs_power.png", bbox_inches="tight")
-    plt.show()
 
 
 # PLOT 5/6: EVM% (and SNR dB) vs frequency from the fixed preamble
@@ -940,98 +766,6 @@ def best_probabilistic_channel_runs(channel_exp_dir):
     return selected_runs
 
 
-def plot_preamble_evm_vs_frequency(run_configs, as_snr_db=False):
-    number_of_configs = len(run_configs)
-    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh), sharex=True, sharey=True,
-                             constrained_layout=True)
-    axes_flat = axes.flatten()
-
-    for panel_index, cfg in enumerate(run_configs):
-        ax = axes_flat[panel_index]
-        (sent_preamble, received_preambles, preamble_length, baseband_sampling_rate_hz,
-         band_min_hz, band_max_hz) = load_fixed_preamble_and_received_preambles(cfg["dataset_path"])
-        in_band_frequencies_hz, in_band_mask = preamble_in_band_frequencies(
-            preamble_length, baseband_sampling_rate_hz, band_min_hz, band_max_hz)
-        frequencies_mhz = in_band_frequencies_hz / 1e6
-
-        measured_evm = measured_preamble_evm_vs_frequency(received_preambles, in_band_mask)
-        measured_curve = evm_percent_to_snr_db(measured_evm) if as_snr_db else measured_evm
-        ax.plot(frequencies_mhz, measured_curve, color="black", marker=".", markersize=2.5,
-                linestyle="-", label="Measured Preamble")
-
-        for model_name, distribution_name, channel_run in best_probabilistic_channel_runs(cfg["channel_exp_dir"]):
-            adapter = load_adapter(channel_run, cfg["channel_exp_dir"])
-            predicted_evm = predicted_preamble_evm_vs_frequency(
-                adapter, sent_preamble, in_band_mask, distribution_name == "gaussian")
-            predicted_curve = evm_percent_to_snr_db(predicted_evm) if as_snr_db else predicted_evm
-            style = _get_style(model_name, distribution_name)
-            ax.plot(frequencies_mhz, predicted_curve, color=style["color"], marker=style["marker"],
-                    linestyle=style["linestyle"], markersize=2.5,
-                    label=f"Predicted {_model_type_label(model_name, distribution_name)}")
-
-        ax.set_title(cfg["label"], fontsize=_FONT)
-        ax.grid(True)
-        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
-                fontsize=_FONT, va="top", ha="left")
-        ax.tick_params(labelbottom=True)
-        if panel_index % 2 == 0:
-            ax.set_ylabel("SNR (dB)" if as_snr_db else "EVM (%)")
-        ax.set_xlabel("Frequency (MHz)")
-
-    axes_flat[0].legend(fontsize=_SMALL, handlelength=3, labelspacing=0.5)
-    for ax in axes_flat[number_of_configs:]:
-        ax.set_visible(False)
-
-    file_stem = "preamble_snr_vs_frequency" if as_snr_db else "preamble_evm_vs_frequency"
-    plt.savefig(PLOT_PATH / f"{file_stem}.svg", format="svg", bbox_inches="tight")
-    plt.savefig(PLOT_PATH / f"{file_stem}.png", bbox_inches="tight")
-    plt.show()
-
-
-def plot_preamble_residual_evm_vs_frequency(run_configs):
-    number_of_configs = len(run_configs)
-    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh), sharex=True, sharey=True,
-                             constrained_layout=True)
-    axes_flat = axes.flatten()
-
-    for panel_index, cfg in enumerate(run_configs):
-        ax = axes_flat[panel_index]
-        (sent_preamble, received_preambles, preamble_length, baseband_sampling_rate_hz,
-         band_min_hz, band_max_hz) = load_fixed_preamble_and_received_preambles(cfg["dataset_path"])
-        in_band_frequencies_hz, in_band_mask = preamble_in_band_frequencies(
-            preamble_length, baseband_sampling_rate_hz, band_min_hz, band_max_hz)
-        frequencies_mhz = in_band_frequencies_hz / 1e6
-        measured_evm = measured_preamble_evm_vs_frequency(received_preambles, in_band_mask)
-
-        ax.axhline(0.0, color="black", linewidth=0.8)
-        for model_name, distribution_name, channel_run in best_probabilistic_channel_runs(cfg["channel_exp_dir"]):
-            adapter = load_adapter(channel_run, cfg["channel_exp_dir"])
-            predicted_evm = predicted_preamble_evm_vs_frequency(
-                adapter, sent_preamble, in_band_mask, distribution_name == "gaussian")
-            residual_evm = measured_evm - predicted_evm
-            style = _get_style(model_name, distribution_name)
-            ax.plot(frequencies_mhz, residual_evm, color=style["color"], marker=style["marker"],
-                    linestyle=style["linestyle"], markersize=2.5,
-                    label=f"{_model_type_label(model_name, distribution_name)} (mean {np.mean(residual_evm):.1f}%)")
-
-        ax.set_title(cfg["label"], fontsize=_FONT)
-        ax.grid(True)
-        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
-                fontsize=_FONT, va="top", ha="left")
-        ax.tick_params(labelbottom=True)
-        if panel_index % 2 == 0:
-            ax.set_ylabel("Residual EVM (%)")
-        ax.set_xlabel("Frequency (MHz)")
-
-    axes_flat[0].legend(fontsize=_SMALL, handlelength=3, labelspacing=0.5)
-    for ax in axes_flat[number_of_configs:]:
-        ax.set_visible(False)
-
-    plt.savefig(PLOT_PATH / "preamble_residual_evm_vs_frequency.svg", format="svg", bbox_inches="tight")
-    plt.savefig(PLOT_PATH / "preamble_residual_evm_vs_frequency.png", bbox_inches="tight")
-    plt.show()
-
-
 # PLOT 7: EVM% vs frequency from empirical E/D validation waveforms
 def subcarrier_frequencies_mhz(dataset_path, active_carrier_indices):
     attrs = dict(zarr.open_group(_resolve(dataset_path), mode="r").attrs)
@@ -1056,46 +790,6 @@ def best_validation_run_for_channel(ed_val_exp_dir, channel_run_id, active_carri
     return min(matching_validation_runs,
                key=lambda run: float(np.nanmean(validation_run_evm_vs_frequency(
                    ed_val_exp_dir, run["run_id"], active_carrier_indices))))["run_id"]
-
-
-def plot_validation_evm_vs_frequency(run_configs):
-    number_of_configs = len(run_configs)
-    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh), sharex=True, sharey=True,
-                             constrained_layout=True)
-    axes_flat = axes.flatten()
-
-    for panel_index, cfg in enumerate(run_configs):
-        ax = axes_flat[panel_index]
-        _, _, active_carrier_indices, _ = load_dataset(cfg["dataset_path"])
-        frequencies_mhz = subcarrier_frequencies_mhz(cfg["dataset_path"], active_carrier_indices)
-
-        for model_name, distribution_name, channel_run in best_probabilistic_channel_runs(cfg["channel_exp_dir"]):
-            validation_run_id = best_validation_run_for_channel(
-                cfg["ed_val_exp_dir"], channel_run["run_id"], active_carrier_indices)
-            if validation_run_id is None:
-                continue
-            evm_curve = validation_run_evm_vs_frequency(cfg["ed_val_exp_dir"], validation_run_id, active_carrier_indices)
-            style = _get_style(model_name, distribution_name)
-            ax.plot(frequencies_mhz, evm_curve, color=style["color"], marker=style["marker"],
-                    linestyle=style["linestyle"], markersize=2.5,
-                    label=f"{_model_type_label(model_name, distribution_name)} E/D")
-
-        ax.set_title(cfg["label"], fontsize=_FONT)
-        ax.grid(True)
-        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
-                fontsize=_FONT, va="top", ha="left")
-        ax.tick_params(labelbottom=True)
-        if panel_index % 2 == 0:
-            ax.set_ylabel("Validation EVM (%)")
-        ax.set_xlabel("Frequency (MHz)")
-
-    axes_flat[0].legend(fontsize=_SMALL, handlelength=3, labelspacing=0.5)
-    for ax in axes_flat[number_of_configs:]:
-        ax.set_visible(False)
-
-    plt.savefig(PLOT_PATH / "validation_evm_vs_frequency.svg", format="svg", bbox_inches="tight")
-    plt.savefig(PLOT_PATH / "validation_evm_vs_frequency.png", bbox_inches="tight")
-    plt.show()
 
 
 # GMP ERR: term ranking for the best GMP model at each DC bias
@@ -1132,32 +826,11 @@ if __name__ == "__main__":
     print("Plot 2 - Pareto: channel params vs experimental EVM% ...")
     plot_pareto_evm(run_configs)
 
-    print("Plot 2b - Predicted vs actual actual EVM ...")
+    print("Plot 3 - Predicted vs actual actual EVM ...")
     plot_predicted_vs_actual_evm(run_configs)
-
-    print("Plot 2c - ECDF of actual EVM per channel form ...")
-    plot_hw_evm_ecdf(run_configs)
-
-    print("Plot 3 - Q-Q plots for best prob TCN ...")
-    plot_qq(run_configs)
 
     print("Plot 4 - Gaussian wave packet TCN response ...")
     plot_packet_response(run_configs)
-
-    print("Plot 4b - Prob TCN learned noise std vs drive power ...")
-    plot_predicted_std_vs_power(run_configs)
-
-    print("Plot 5 - Preamble EVM% vs frequency ...")
-    plot_preamble_evm_vs_frequency(run_configs)
-
-    print("Plot 6 - Preamble SNR (dB) vs frequency ...")
-    plot_preamble_evm_vs_frequency(run_configs, as_snr_db=True)
-
-    print("Plot 6b - Preamble residual EVM% (measured - predicted) vs frequency ...")
-    plot_preamble_residual_evm_vs_frequency(run_configs)
-
-    print("Plot 7 - E/D validation EVM% vs frequency ...")
-    plot_validation_evm_vs_frequency(run_configs)
 
     # print("\nBest GMP ERR term ranking per DC bias ...")
     # print_best_gmp_err(run_configs)
