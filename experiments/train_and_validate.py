@@ -33,6 +33,7 @@ HERE = Path(__file__).resolve().parent
 
 CONFIG_FILE = HERE / "train_and_validate.yml"
 EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
+LOG_DIR = HERE.parent / "data/logs"
 
 SELECTED_CHANNEL_RUN_IDS = None  # None -> best per family; or ["tcn_xxxx", ...]
 SELECTED_ED_RUN_IDS = None       # None -> all E/D runs; or ["tcn_ae_xxxx", ...]
@@ -45,7 +46,8 @@ MEASURED_A_OFFSET = 0.000
 if __name__ == "__main__":
     RUN_NAME = generate_run_name()
 
-    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME) as Exp:
+    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME,
+                             log_dir=LOG_DIR) as Exp:
         cfg = Exp.config.DATA_COLLECTION
         device = Exp.config.RUNTIME.DEVICE
         seed = int(Exp.config.RUNTIME.SEED)

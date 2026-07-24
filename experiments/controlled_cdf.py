@@ -1,10 +1,7 @@
 '''
 Controlled per-category CDF experiment, run after a finished train_and_validate.
 
-The train_and_validate ECDF pools every validated E/D per channel form, but the forms
-have unequal counts and their channel models span a wide fidelity range, so a form can
-look better just because its channels happened to be good. This isolates the channel
-form as the only variable: take the single best channel model of each form, train k
+take the single best channel model of each form, train k
 encoder/decoders that differ only by seed on each, and validate them all on the live
 channel. Every form then contributes exactly k runs from an equally-good channel, so
 the per-form EVM ECDFs are a fair comparison.
@@ -34,6 +31,7 @@ HERE = Path(__file__).resolve().parent
 
 CONFIG_FILE = HERE / "train_and_validate.yml"
 EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
+LOG_DIR = HERE.parent / "data/logs"
 
 # The annealing sweep, not the model form, is the comparison here, so colour encodes the
 # annealing value (a sequential ramp, since annealing is ordered) rather than following the
@@ -133,7 +131,8 @@ def plot_per_form_ecdf(validation_exp_dir, ed_exp_dir, out_path):
 if __name__ == "__main__":
     RUN_NAME = generate_run_name()
 
-    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME) as Exp:
+    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME,
+                             log_dir=LOG_DIR) as Exp:
         test_cfg = Exp.config.CONTROLLED_CDF
         if not getattr(test_cfg, "ENABLED", False):
             Exp.log("CONTROLLED_CDF.ENABLED is false, nothing to do")
