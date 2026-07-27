@@ -77,7 +77,7 @@ if __name__ == "__main__":
         osc_fs = float(cfg.OSC_SAMPLE_RATES[0])
         subcarrier_spacing = float(cfg.SUBCARRIER_SPACING)
 
-        pwr_supply.set_6V(voltage=4, current=dc_offset_A)  # current-limited; never reaches 4 V
+        pwr_supply.set_25V(voltage=4, current=dc_offset_A)  # current-limited; never reaches 4 V
         pwr_supply.enable_output()
         Exp.log(f"DC offset set to {dc_offset_A - MEASURED_A_OFFSET:.3f} A")
 
