@@ -495,7 +495,7 @@ class ApplyEncoder(FunctionalBlock):
         x.artifact_container['encoder_output'] = encoded_symbol
         encoded = np.concatenate((preamble, encoded_symbol))
         x.data = encoded
-        x.artifact_container['awg_waveform'] = np.clip(resample(encoded, self.output_length),
+        x.artifact_container['awg_waveform'] = np.clip(resample_poly(encoded, self.output_length, len(encoded)),
                                                        -self.clip_value, self.clip_value)
         
         
