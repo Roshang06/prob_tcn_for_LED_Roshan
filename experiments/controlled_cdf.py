@@ -49,6 +49,10 @@ NONPROB_COLOR = "#000000"
 ANNEAL_CMAP = "plasma"
 CLIP_PENALTY_CMAP = "plasma"
 
+# marker shape encodes rho in the clip figure, assigned in ascending rho order, so traces
+# sharing a rho stay recognizable even where the colour ramp separates them
+CLIP_RHO_MARKERS = ("o", "s", "^", "D", "v", "P")
+
 BASELINE_CLIP_WEIGHT = 0.0
 BASELINE_ANNEAL = 1.0
 
@@ -190,9 +194,11 @@ def _clip_penalty_colormap(products):
 
 
 def plot_clip_penalty_ecdf(validation_exp_dir, out_path):
-    '''ECDF of validation EVM over the clip-penalty sweep, one trace per (rho, weight) pair,
-    coloured by the rho * weight product. The weight-0 arm is the no-penalty control and is
-    drawn as a black dashed baseline, as in the annealing figure.'''
+    '''ECDF of validation EVM over the clip-penalty sweep, one trace per (rho, weight) pair.
+    Colour tracks the rho * weight product and marker shape tracks rho alone, so traces
+    sharing a rho stay visually grouped where the colour ramp puts them far apart. The
+    weight-0 arm is the no-penalty control, a black dashed baseline as in the annealing
+    figure, marked with an x since it has no rho.'''
     val_rows = _read_jsonl(Path(validation_exp_dir) / "runs.jsonl")
 
     groups = {}
@@ -203,6 +209,9 @@ def plot_clip_penalty_ecdf(validation_exp_dir, out_path):
 
     penalty_keys = [key for key in groups if key is not None]
     cmap, norm = _clip_penalty_colormap([rho * weight for rho, weight in penalty_keys])
+    rho_values = sorted({rho for rho, _ in penalty_keys})
+    marker_for_rho = {rho: CLIP_RHO_MARKERS[index % len(CLIP_RHO_MARKERS)]
+                      for index, rho in enumerate(rho_values)}
 
     fig = Figure(figsize=(7.5, 5))
     ax = fig.subplots()
@@ -213,19 +222,19 @@ def plot_clip_penalty_ecdf(validation_exp_dir, out_path):
         quantiles = np.arange(1, len(evms) + 1) / len(evms)
 
         if key is None:
-            color, linestyle = NONPROB_COLOR, "--"
+            color, linestyle, marker = NONPROB_COLOR, "--", "x"
             label = f"no clip penalty (n={len(evms)})"
         else:
             rho, weight = key
-            color, linestyle = cmap(norm(rho * weight)), "-"
+            color, linestyle, marker = cmap(norm(rho * weight)), "-", marker_for_rho[rho]
             label = f"rho={rho:g}, weight={weight:g} (n={len(evms)})"
 
         ax.step(np.concatenate([[evms[0]], evms]),
                 np.concatenate([[0.0], quantiles]),
                 where="post", color=color, lw=1.6, linestyle=linestyle)
-        ax.plot(evms, quantiles, linestyle="none", marker="o", color=color, ms=5)
+        ax.plot(evms, quantiles, linestyle="none", marker=marker, color=color, ms=6)
 
-        legend_handles.append(Line2D([], [], color=color, marker="o", ms=5,
+        legend_handles.append(Line2D([], [], color=color, marker=marker, ms=6,
                                      lw=1.6, linestyle=linestyle, label=label))
 
     ax.set_xlabel("Validation EVM (%)")
@@ -233,7 +242,7 @@ def plot_clip_penalty_ecdf(validation_exp_dir, out_path):
     ax.set_ylim(0, 1.02)
     ax.grid(True, alpha=0.3)
     ax.legend(handles=legend_handles, fontsize=8, frameon=False, loc="lower right")
-    ax.set_title("Validation EVM ECDF over the clip-penalty sweep (prob channel)")
+    ax.set_title("Validation EVM ECDF for the Clip Penalty Sweep")
     fig.tight_layout()
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
 
