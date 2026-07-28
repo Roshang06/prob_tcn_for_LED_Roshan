@@ -102,6 +102,8 @@ class EncoderDecoderGridSearch(GridSearchBase):
         # one real-channel local-gain curve g(a) for the optional clip-avoidance penalty,
         # shared across every channel model so the penalty is identical in all environments
         self._build_gain_curve(sent_data, received_data)
+        self._plot_transfer_gain()
+        self._save_gain_curve()
         # band-limited ZC preamble (identical to ModulateDataOFDM) prepended to every
         # training burst so the encoder/decoder learn to preserve it for hardware sync
         fs = ofdm_config.baseband_fft_length * ofdm_config.subcarrier_spacing
@@ -148,7 +150,45 @@ class EncoderDecoderGridSearch(GridSearchBase):
         core = centers.abs() < drive.std()
         self.gain_centers = centers.detach()
         self.gain_values = gain.detach()
+        self.transfer_values = transfer.detach()
         self.reference_gain = float(gain[core].median())
+
+    def _plot_transfer_gain(self):
+        '''Publication figure of the channel's estimated static transfer and its local gain,
+        the empirical basis for the clip-avoidance penalty. Built once and saved at the
+        experiment root, shared by every run.'''
+        centers = self.gain_centers.cpu().numpy()
+        transfer = self.transfer_values.cpu().numpy()
+        normalized_gain = (self.gain_values / (self.reference_gain + 1e-12)).cpu().numpy()
+
+        fig = Figure(figsize=(3.4, 3.8))
+        transfer_ax, gain_ax = fig.subplots(2, 1, sharex=True)
+
+        transfer_ax.plot(centers, transfer, color="#0072B2", lw=1.5)
+        transfer_ax.set_ylabel("Mean output (V)")
+        transfer_ax.grid(True, alpha=0.3)
+
+        gain_ax.plot(centers, normalized_gain, color="#000000", lw=1.5)
+        gain_ax.axhline(1.0, color="#999999", lw=0.8, ls="--")
+        gain_ax.set_ylabel(r"Local gain $g(a)/g_\mathrm{ref}$")
+        gain_ax.set_xlabel("Drive amplitude a (V)")
+        gain_ax.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        self.exp_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(self.exp_dir / "channel_transfer_gain.png", dpi=300, bbox_inches="tight")
+        fig.savefig(self.exp_dir / "channel_transfer_gain.svg", bbox_inches="tight")
+
+    def _save_gain_curve(self):
+        '''
+        Save the Gain curve for later analysis.
+        '''
+        self.exp_dir.mkdir(parents=True, exist_ok=True)
+        np.savez(self.exp_dir / "gain_curve.npz",
+                 centers=self.gain_centers.cpu().numpy(),
+                 transfer=self.transfer_values.cpu().numpy(),
+                 gain=self.gain_values.cpu().numpy(),
+                 reference_gain=np.float32(self.reference_gain))
 
     def _clip_penalty(self, drive, rho):
         '''Squared shortfall of the channel local gain below rho, where the gain is

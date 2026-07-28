@@ -51,6 +51,8 @@ class EncoderDecoderValidation(GridSearchBase):
                    "channel_run_id": m.get("channel_run_id"),
                    "channel_receptive_field": m.get("channel_receptive_field"),
                    "channel_distribution": m.get("channel_distribution", "none"),
+                   "clip_penalty_weight": m.get("clip_penalty_weight"),
+                   "clip_penalty_rho": m.get("clip_penalty_rho"),
                    "checkpoint": str(m["checkpoint"])}
                   for m in ed_models]
         super().__init__(points, {"ed_models": [m["run_id"] for m in ed_models]},
@@ -89,7 +91,7 @@ class EncoderDecoderValidation(GridSearchBase):
                        demod])
 
         sent_syms, recv_syms, true_bits, sent_time, recv_time = [], [], [], [], []
-        frac_delays, encoder_powers = [], []
+        frac_delays, encoder_powers, encoder_drives = [], [], []
         fft_length = demod.ofdm_symbol_length_with_cp - demod.cyclic_prefix_length
         freqs, example = None, None
         # per-stage constellations for the first few trials (equalization-comparison figure)
@@ -126,6 +128,7 @@ class EncoderDecoderValidation(GridSearchBase):
             # payload, what ModulateDataOFDM's random scaling targets)
             encoder_output = np.asarray(art["encoder_output"], dtype=np.float64)
             encoder_powers.append(float(np.mean(encoder_output[-fft_length:] ** 2)))
+            encoder_drives.append(encoder_output.astype("float32"))
             freqs = np.asarray(art["subcarrier_freqs_hz"])
 
             # equalization-comparison stages: the constellation as it passes encoder ->
@@ -155,6 +158,8 @@ class EncoderDecoderValidation(GridSearchBase):
             "channel_run_id": point.get("channel_run_id"),
             "channel_receptive_field": point.get("channel_receptive_field"),
             "channel_distribution": point.get("channel_distribution", "none"),
+            "clip_penalty_weight": point.get("clip_penalty_weight"),
+            "clip_penalty_rho": point.get("clip_penalty_rho"),
         }
         if frac_delays:
             metrics["frac_delay_std_samples"] = float(np.std(frac_delays))
@@ -163,7 +168,8 @@ class EncoderDecoderValidation(GridSearchBase):
         metrics["sync_outliers_skipped"] = sync_outliers_skipped
 
         self._store_waveforms(run_dir.name, np.stack(sent_time), np.stack(recv_time), point["channel_form"],
-                              frac_delays=np.asarray(frac_delays, dtype="float32") if frac_delays else None)
+                              frac_delays=np.asarray(frac_delays, dtype="float32") if frac_delays else None,
+                              encoder_drive=np.stack(encoder_drives))
         label = f"{run_dir.name} | channel: {point['channel_form']}"
         self._plot_constellation(run_dir, sent_syms, recv_syms, freqs,
                                  ed_run_id=run_dir.name,
@@ -359,11 +365,14 @@ class EncoderDecoderValidation(GridSearchBase):
         fig.savefig(run_dir / "plots" / "equalization_comparison.png", dpi=130, bbox_inches="tight")
 
     # ------------------------------------------------------------- artifacts
-    def _store_waveforms(self, model_id, sent, received, channel_form, frac_delays=None):
+    def _store_waveforms(self, model_id, sent, received, channel_form, frac_delays=None,
+                         encoder_drive=None):
         g = self.val_group[model_id] if model_id in self.val_group else self.val_group.create_group(model_id)
         arrays = [("sent_time", sent), ("received_time", received)]
         if frac_delays is not None:
             arrays.append(("fractional_delay_samples", frac_delays))
+        if encoder_drive is not None:
+            arrays.append(("encoder_drive", encoder_drive))
         for name, arr in arrays:
             za = g.create_array(name, shape=arr.shape, chunks=arr.shape, dtype=arr.dtype, overwrite=True)
             za[:] = arr
@@ -511,5 +520,7 @@ def select_encoder_decoders(ed_exp_dir, channel_exp_dir=None, run_ids=None):
             "channel_form": derive_channel_form(ch_meta),
             "channel_receptive_field": ch_meta.get("receptive_field"),
             "channel_distribution": ch_meta.get("distribution", "none"),
+            "clip_penalty_weight": row.get("clip_penalty_weight"),
+            "clip_penalty_rho": row.get("clip_penalty_rho"),
         })
     return selected

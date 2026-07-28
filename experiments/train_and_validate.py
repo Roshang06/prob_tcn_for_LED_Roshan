@@ -80,7 +80,6 @@ if __name__ == "__main__":
         pwr_supply.set_25V(voltage=4, current=dc_offset_A)  # current-limited; never reaches 4 V
         pwr_supply.enable_output()
         Exp.log(f"DC offset set to {dc_offset_A - MEASURED_A_OFFSET:.3f} A")
-
         check_channel = CheckChannel(awg_driver=awg, osc_driver=osc, data_channel=3)
 
         mod_ofdm = ModulateDataOFDM(
@@ -280,5 +279,8 @@ if __name__ == "__main__":
             for row in sorted(rows, key=lambda r: float(r[metric])):
                 extra = f"  ber={float(row['ber']):.4f}" if row.get("ber") else ""
                 dist = row.get("distribution") or row.get("channel_distribution") or row.get("channel_form") or "?"
+                clip = ""
+                if row.get("clip_penalty_weight") not in (None, ""):
+                    clip = f"  clip_w={float(row['clip_penalty_weight']):g} rho={float(row['clip_penalty_rho']):g}"
                 print(f"    {row['run_id']}  {metric}={float(row[metric]):.6f}{extra}  "
-                      f"dist={dist}  params={row['num_params']}  t={row['train_seconds']}s")
+                      f"dist={dist}  params={row['num_params']}  t={row['train_seconds']}s{clip}")
