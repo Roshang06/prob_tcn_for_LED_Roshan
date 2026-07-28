@@ -361,6 +361,7 @@ if __name__ == "__main__":
         seeds = list(test_cfg.SEEDS)
         anneal_starts = list(test_cfg["ANNEAL_STARTS"])
         num_trials = int(test_cfg.N)
+        noise_floor_points = int(getattr(test_cfg, "NOISE_FLOOR_POINTS", 0) or 0)
 
         run_annealing_sweep = bool(getattr(test_cfg, "RUN_ANNEALING_SWEEP", True))
         run_clip_penalty_sweep = bool(getattr(test_cfg, "RUN_CLIP_PENALTY_SWEEP", False))
@@ -504,6 +505,7 @@ if __name__ == "__main__":
                 (mod_val, send_waveform, measure_waveform, resample_waveform,
                  fractional_sync, demod_val),
                 num_trials=num_trials,
+                noise_floor_points=noise_floor_points,
                 constellation=val_constellation,
                 clip_value=float(cfg.CLIP_THRESHOLD),
                 device=device, seed=seed, experiments_dir=parent_dir,

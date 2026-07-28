@@ -181,6 +181,8 @@ CONTROLLED_CDF:
   RHOS: [0.25, 0.5, 0.75]
   CLIP_WEIGHTS: [1.0, 10.0, 100.0]
   CLIP_SWEEP_ANNEAL_START: 0.5 # empirical best value from previous sweep
+  NOISE_FLOOR_POINTS: 10  # replays of one fixed encoded symbol per E/D to estimate the
+                          # additive noise floor; 0 disables the noise-floor plot
 
 # Standalone offline learning curve (experiments/dataset_size_sweep.py): fits one fixed
 # channel architecture on growing subsets of a dataset and plots val per-burst rRMSE vs
