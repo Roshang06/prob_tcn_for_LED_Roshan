@@ -148,7 +148,7 @@ class ModulateDataOFDM(FunctionalBlock):
 
 
         # Now, upsample from baseband sampling rate to AWG sampling rate with sinc interpolation
-        awg_waveform = resample(baseband_burst, self.output_length)
+        awg_waveform = resample_poly(baseband_burst, self.output_length, len(baseband_burst))
         awg_waveform = np.clip(awg_waveform, -self.clip_threshold, self.clip_threshold)
 
 
