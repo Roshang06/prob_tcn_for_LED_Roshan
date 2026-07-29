@@ -171,15 +171,16 @@ ENCODER_DECODER_VALIDATION:
 # train_and_validate.
 CONTROLLED_CDF:
   ENABLED: true
-  RUN_ANNEALING_SWEEP: true  # retrain the best E/D's architecture with a grid of annealing start values
-  RUN_CLIP_PENALTY_SWEEP: true  # retrain the best E/D's architecture with a grid of clip-penalty weights
-  SEEDS: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]   # one E/D per seed per channel form; controls the n
-  ANNEAL_STARTS: [1.0, 0.5, 0.25, 0.1]  
+  RUN_ANNEALING_SWEEP: false  # retrain the best E/D's architecture with a grid of annealing start values
+  RUN_CLIP_PENALTY_SWEEP: false  # retrain the best E/D's architecture with a grid of clip-penalty weights
+  RUN_JOINT_SWEEP: true  
+  SEEDS: [0, 1, 2, 3, 4, 5, 6, 7, 8]   # one E/D per seed per channel form; controls the n
+  ANNEAL_STARTS: [1.0, 0.5, 0.25]  
   N: 10                          # validation trials per E/D
   EXCLUDE_MODELS: [gmp, lru]             # channel model types to skip (e.g. gmp is slow); [] keeps all
   CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/prime_coast_channel_models_20260725_1940
   RHOS: [0.25, 0.5, 0.75]
-  CLIP_WEIGHTS: [1.0, 10.0, 100.0]
+  CLIP_WEIGHTS: [1.0, 10.0]
   CLIP_SWEEP_ANNEAL_START: 0.5 # empirical best value from previous sweep
   NOISE_FLOOR_POINTS: 10  # replays of one fixed encoded symbol per E/D to estimate the
                           # additive noise floor; 0 disables the noise-floor plot

@@ -28,6 +28,7 @@ from modules.grid_search import (
 )
 from modules.grid_search.base import generate_run_name
 from modules.utils import OFDMConfig
+from plot_annealing_interaction import load_sweep_table, plot_annealing_interaction
 
 HERE = Path(__file__).resolve().parent
 
@@ -99,6 +100,30 @@ def build_clip_swept_grid(seeds, anneal_start, rhos, clip_weights):
     params["clip_penalty_rho"] = list(rhos)
     params["clip_penalty_weight"] = [BASELINE_CLIP_WEIGHT] + list(clip_weights)
     return grid_config
+
+
+def build_joint_swept_grid(seeds, anneal_starts, rhos, clip_weights):
+    '''Full factorial over annealing and the clip penalty: seed x noise_anneal_start x rho x
+    weight. the control for this comparison is the deterministic channel, which keep_joint_sweep_points keeps.'''
+    grid_config = _fixed_ed_grid_config()
+    params = grid_config["params"]
+    params["seed"] = list(seeds)
+    params["noise_anneal_start"] = list(anneal_starts)
+    params["clip_penalty_rho"] = list(rhos)
+    params["clip_penalty_weight"] = list(clip_weights)
+    return grid_config
+
+
+def keep_joint_sweep_points(points, prob_channel_ids):
+    '''Prob channels get the whole annealing axis. Annealing is inert on a deterministic
+    channel, so those are pinned to a single value and become the control column: same rho and
+    weight sweep, no stochastic channel to anneal.'''
+    kept = []
+    for point in points:
+        is_prob = point["channel_run_id"] in prob_channel_ids
+        if is_prob or float(point["params"]["noise_anneal_start"]) == BASELINE_ANNEAL:
+            kept.append(point)
+    return kept
 
 
 def keep_clip_sweep_points(points, prob_channel_ids, baseline_rho):
@@ -374,8 +399,9 @@ if __name__ == "__main__":
 
         run_annealing_sweep = bool(getattr(test_cfg, "RUN_ANNEALING_SWEEP", True))
         run_clip_penalty_sweep = bool(getattr(test_cfg, "RUN_CLIP_PENALTY_SWEEP", False))
-        if not run_annealing_sweep and not run_clip_penalty_sweep:
-            Exp.log("both CONTROLLED_CDF sweeps are disabled, nothing to do")
+        run_joint_sweep = bool(getattr(test_cfg, "RUN_JOINT_SWEEP", False))
+        if not any((run_annealing_sweep, run_clip_penalty_sweep, run_joint_sweep)):
+            Exp.log("every CONTROLLED_CDF sweep is disabled, nothing to do")
             raise SystemExit(0)
 
         channel_exp_dir = getattr(test_cfg, "CHANNEL_EXP_DIR", None)
@@ -562,5 +588,18 @@ if __name__ == "__main__":
                     clip_threshold=float(cfg.CLIP_THRESHOLD),
                     out_path=out_path)
                 Exp.log(f"drive distribution rho={plot_rho:g} weight={plot_weight:g} -> {out_path.name}")
+
+        if run_joint_sweep:
+            rhos = list(test_cfg["RHOS"])
+            clip_weights = list(test_cfg["CLIP_WEIGHTS"])
+            Exp.log(f"joint sweep anneal={anneal_starts} rhos={rhos} weights={clip_weights} "
+                    f"(nonprob channels pinned to anneal {BASELINE_ANNEAL} as the control)")
+            joint_ed_dir, joint_val_dir = train_and_validate(
+                build_joint_swept_grid(seeds, anneal_starts, rhos, clip_weights),
+                lambda points: keep_joint_sweep_points(points, prob_channel_ids),
+                "joint")
+
+            plot_annealing_interaction(load_sweep_table(parent_dir),
+                                       parent_dir / "annealing_interaction.png")
 
         Exp.log(f"controlled-CDF complete: {parent_dir}")
