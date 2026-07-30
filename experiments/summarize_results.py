@@ -1,5 +1,5 @@
 """
-Aggregate multi-DC-offset results and generate paper figures.
+Aggregates results from multiple DC offsets and generate paper figures.
 
 Edit RUN_CONFIGS and PLOT_PATH at the top, then:
     cd <repo_root>/experiments
@@ -13,7 +13,6 @@ Each RUN_CONFIG entry must point to:
   - ed_val_exp_dir   : ed_validation output folder (must pair with the
                        encoder-decoder grid search that used the above channel models)
   - dataset_path     : the zarr dataset the channel models were trained on
-                       (must match format: new burst format or legacy symbol-only)
 """
 import json
 import os
@@ -31,7 +30,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from modules.grid_search.adapters import MODEL_REGISTRY
-from modules.utils import calculate_per_burst_rrmse_pct_loss
+from modules.utils import calculate_per_burst_rrmse_pct_loss, evm_pct
 
 # USER CONFIG
 RUN_CONFIGS = [
@@ -57,8 +56,8 @@ PLOT_PATH       = Path(__file__).resolve().parent.parent / "data/plots"
 DEVICE          = "cpu"
 N_POWER_BINS    = 10       # bins for plot 1
 MAX_QQ_SAMPLES  = 10_000  # downsample for Q-Q speed
-SHOW_RUN_IN_TITLE = True  # append " (from <run_name>)" to every figure title
-# Style (matches make_figures.ipynb)
+SHOW_RUN_IN_TITLE = True # Turn false for final manuscript plots
+
 _FONT = 7
 _SMALL = 5
 _mm = 1 / 25.4
@@ -98,11 +97,6 @@ plt.rcParams.update({
 _CMAP = plt.get_cmap("viridis")   # sequential scales only (frequency/power gradients)
 
 # Shared style dictionary: (model_family, distribution) -> plot kwargs.
-# Used identically across all figures so the same model type always looks the same.
-# Okabe-Ito palette (colorblind-safe), assigned semantically: near-black = GMP
-# baseline, cool hues = nonprob (blue TCN, green LRU), warm hues = prob
-# (orange/vermillion TCN, purple/sky LRU). Adjacent-pair CVD separation validated
-# (worst ΔE 19 under protan/deutan/tritan simulation vs floor 8 / target 12).
 MODEL_STYLES: dict[tuple[str, str], dict] = {
     ("gmp", "none"):       {"color": "#333333", "marker": "o", "linestyle": "-"},
     ("tcn", "none"):       {"color": "#0072B2", "marker": "^", "linestyle": "--"},
@@ -231,7 +225,7 @@ def per_trial_evm(ed_val_exp_dir: str, ks_indices: np.ndarray) -> dict[str, np.n
     """
     root = zarr.open_group(_resolve(ed_val_exp_dir) / "validation.zarr", mode="r")
     evm_by_run = {}
-    for run_id in root.keys():
+    for run_id in root:
         group = root[run_id]
         sent = group["sent_time"][:]     # (num_trials, symbol_length)
         received = group["received_time"][:]
@@ -240,9 +234,7 @@ def per_trial_evm(ed_val_exp_dir: str, ks_indices: np.ndarray) -> dict[str, np.n
         for trial in range(sent.shape[0]):
             sent_spectrum = np.fft.rfft(sent[trial], norm="ortho")[ks_indices]
             received_spectrum = np.fft.rfft(received[trial], norm="ortho")[ks_indices]
-            signal_power = np.mean(np.abs(sent_spectrum) ** 2)
-            residual_power = np.mean(np.abs(sent_spectrum - received_spectrum) ** 2)
-            trial_evms.append(float(np.sqrt(residual_power / (signal_power + 1e-12)) * 100))
+            trial_evms.append(float(evm_pct(sent_spectrum, received_spectrum)))
         evm_by_run[run_id] = np.array(trial_evms)
     return evm_by_run
 
@@ -294,10 +286,7 @@ def _discover_model_types(run_configs: list[dict]) -> list[tuple[str, str]]:
     return sorted(seen, key=_model_type_sort_key)
 
 
-# PLOT 1: Val RRMSE vs Sent Power - 2×2 subplot grid, one panel per DC bias
-# Model type -> style from MODEL_STYLES (color/marker/linestyle), consistent across panels.
-# Shared x/y axes so panels are directly comparable.
-
+# PLOT 1: Val RRMSE vs Sent Power: 2×2 subplot grid, one panel per DC bias
 _PANEL_LABELS = ["(a)", "(b)", "(c)", "(d)"]
 
 def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
@@ -320,7 +309,7 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
                           if r["model"] == model and (r.get("distribution") or "none") == dist]
             if not candidates:
                 continue
-            best    = _best_by(candidates, "val_per_burst_rrmse_pct", "val_rrmse_pct")
+            best = _best_by(candidates, "val_per_burst_rrmse_pct", "val_rrmse_pct")
             adapter = load_adapter(best, cfg["channel_exp_dir"])
             centers, rrmse = _binned_rrmse(X, Y, adapter)
             mask = ~np.isnan(rrmse)
@@ -354,10 +343,10 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
     plt.show()
 
 
-# PLOT 2: Pareto - channel model params vs experimental EVM%
-# 2×2 subplot grid, one panel per DC bias (mirrors plot 1).
-# One trace per (model, distribution) type using MODEL_STYLES.
-# Lines connect points ordered by param count; error bars = 2× SE (≈ 95% CI).
+# PLOT 2: Pareto channel model params vs experimental EVM%
+# 2×2 subplot grid, one panel per DC bias
+# One trace per (model, distribution)
+# error bars = 2× SE (≈ 95% CI).
 
 def plot_pareto_evm(run_configs: list[dict]) -> None:
     n = len(run_configs)
@@ -445,12 +434,7 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
     plt.show()
 
 
-# PLOT 2b: predicted vs actual actual EVM per validated E/D run
-# Predicted = the E/D's own training environment evaluated on the exact validation
-# bursts: encoder -> frozen channel model (noisy forward for prob models, so their
-# prediction includes the noise they model) -> decoder. A calibrated environment
-# puts runs on the y=x diagonal; deterministic environments predict optimistically.
-
+# PLOT 3: predicted vs actual actual EVM per validated E/D run
 _ED_ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels")
 
 
@@ -513,6 +497,7 @@ def _replay_predicted_trial_evms(cfg) -> dict[str, np.ndarray]:
 
         sent_spectrum = np.fft.fft(symbol.cpu().numpy().astype(np.float64), norm="ortho", axis=1)[:, active_carrier_indices]
         decoded_spectrum = np.fft.fft(decoded.astype(np.float64), norm="ortho", axis=1)[:, active_carrier_indices]
+
         signal_power = np.mean(np.abs(sent_spectrum) ** 2, axis=1)
         predicted_evm[run_id] = np.sqrt(np.mean(np.abs(decoded_spectrum - sent_spectrum) ** 2, axis=1) / signal_power) * 100
     return predicted_evm
@@ -571,16 +556,6 @@ def plot_predicted_vs_actual_evm(run_configs: list[dict]) -> None:
     plt.savefig(PLOT_PATH / "predicted_vs_actual_evm.png", bbox_inches="tight")
     plt.show()
 
-
-# PLOT 2c: ECDF of actual EVM per channel form
-# P(hw EVM <= x) across validated E/D runs: "more likely to perform well" as a
-# literal CDF statement. A form whose curve sits up-and-left stochastically
-# dominates, even if another form owns the single best run.
-
-
-# PLOT 3: Q-Q plots for best prob TCN at each DC bias
-
-
 # PLOT 4: TCN predicted response to a Gaussian wave packet (lowest DC bias)
 def plot_packet_response(run_configs: list[dict]) -> None:
     cfg = min(run_configs, key=lambda c: c["dc_ma"])
@@ -600,10 +575,10 @@ def plot_packet_response(run_configs: list[dict]) -> None:
     root = zarr.open_group(_resolve(cfg["dataset_path"]), mode="r")
     attrs = dict(root.attrs)
     active_carrier_indices = np.array(attrs["active_carrier_indices"])
-    f_min_hz = float(attrs.get("f_min_hz", 300e3))
-    subcarrier_spacing_hz = f_min_hz / active_carrier_indices[0]   # e.g. 300e3 / 30 = 10 kHz
+    f_min_hz = float(attrs.get("f_min_hz"))
+    subcarrier_spacing_hz = f_min_hz / active_carrier_indices[0]
     if "sent_burst" in root:
-        preamble_length = int(attrs.get("preamble_length", 0))
+        preamble_length = int(attrs.get("preamble_length"))
         cyclic_prefix_length = int(attrs["cyclic_prefix_length"])
         symbol_length = root["sent_burst"].shape[1] - preamble_length - cyclic_prefix_length
     else:
@@ -694,104 +669,6 @@ def plot_packet_response(run_configs: list[dict]) -> None:
     plt.show()
 
 
-# PLOT 4b: best prob TCN's predicted noise std vs input power (one line per DC bias)
-
-
-# PLOT 5/6: EVM% (and SNR dB) vs frequency from the fixed preamble
-def evm_percent_to_snr_db(evm_percent):
-    evm_fraction = np.asarray(evm_percent) / 100.0
-    return -20.0 * np.log10(evm_fraction + 1e-12)
-
-
-def load_fixed_preamble_and_received_preambles(dataset_path, device=DEVICE):
-    root = zarr.open_group(_resolve(dataset_path), mode="r")
-    attrs = dict(root.attrs)
-    active_carrier_indices = np.array(attrs["active_carrier_indices"])
-    preamble_length = int(attrs["preamble_length"])
-    cyclic_prefix_length = int(attrs["cyclic_prefix_length"])
-    subcarrier_spacing_hz = float(attrs["f_min_hz"]) / active_carrier_indices[0]
-    symbol_length = root["sent_burst"].shape[1] - preamble_length - cyclic_prefix_length
-    baseband_sampling_rate_hz = symbol_length * subcarrier_spacing_hz
-    band_min_hz = float(attrs["f_min_hz"])
-    band_max_hz = float(attrs.get("f_max_hz", active_carrier_indices[-1] * subcarrier_spacing_hz))
-    sent_preamble = torch.tensor(root["sent_burst"][0, :preamble_length], dtype=torch.float32, device=device)
-    received_preambles = np.array(root["received_burst"][:, :preamble_length])
-    return (sent_preamble, received_preambles, preamble_length,
-            baseband_sampling_rate_hz, band_min_hz, band_max_hz)
-
-
-def preamble_in_band_frequencies(preamble_length, baseband_sampling_rate_hz, band_min_hz, band_max_hz):
-    preamble_frequencies_hz = np.fft.rfftfreq(preamble_length, d=1.0 / baseband_sampling_rate_hz)
-    in_band_mask = (preamble_frequencies_hz >= band_min_hz) & (preamble_frequencies_hz <= band_max_hz)
-    return preamble_frequencies_hz[in_band_mask], in_band_mask
-
-
-def measured_preamble_evm_vs_frequency(received_preambles, in_band_mask):
-    received_spectrum = np.fft.rfft(received_preambles, norm="ortho", axis=-1)[:, in_band_mask]
-    mean_signal_spectrum = received_spectrum.mean(axis=0)
-    residual_noise_power = np.mean(np.abs(received_spectrum - mean_signal_spectrum[None, :]) ** 2, axis=0)
-    return np.sqrt(residual_noise_power) / (np.abs(mean_signal_spectrum) + 1e-12) * 100.0
-
-
-def predicted_preamble_evm_vs_frequency(adapter, sent_preamble, in_band_mask, is_gaussian,
-                                        num_stochastic_samples=5000):
-    model = adapter.model
-    model.eval()
-    device = next(model.parameters()).device
-    preamble_batch = sent_preamble.unsqueeze(0).to(device)
-    with torch.no_grad():
-        _, predicted_mean, predicted_std, predicted_nu = model(preamble_batch)
-        if is_gaussian:
-            predicted_distribution = torch.distributions.Normal(predicted_mean, predicted_std)
-        else:
-            predicted_distribution = torch.distributions.StudentT(predicted_nu, predicted_mean, predicted_std)
-        stochastic_samples = predicted_distribution.sample((num_stochastic_samples,)).squeeze(1).cpu().numpy()
-    mean_response = predicted_mean.squeeze(0).cpu().numpy()
-    mean_signal_spectrum = np.fft.rfft(mean_response, norm="ortho")[in_band_mask]
-    sample_spectra = np.fft.rfft(stochastic_samples, norm="ortho", axis=-1)[:, in_band_mask]
-    residual_noise_power = np.mean(np.abs(sample_spectra - mean_signal_spectrum[None, :]) ** 2, axis=0)
-    return np.sqrt(residual_noise_power) / (np.abs(mean_signal_spectrum) + 1e-12) * 100.0
-
-
-def best_probabilistic_channel_runs(channel_exp_dir):
-    channel_runs = load_channel_runs(channel_exp_dir)
-    probabilistic_runs = [run for run in channel_runs
-                          if (run.get("distribution") or "none") in ("gaussian", "students_t")]
-    selected_runs = []
-    for model_name in dict.fromkeys(run["model"] for run in probabilistic_runs):
-        architecture_runs = [run for run in probabilistic_runs if run["model"] == model_name]
-        best_run = _best_by(architecture_runs, "val_nll", "val_per_burst_rrmse_pct")
-        selected_runs.append((model_name, best_run.get("distribution") or "none", best_run))
-    selected_runs.sort(key=lambda selected: _model_type_sort_key((selected[0], selected[1])))
-    return selected_runs
-
-
-# PLOT 7: EVM% vs frequency from empirical E/D validation waveforms
-def subcarrier_frequencies_mhz(dataset_path, active_carrier_indices):
-    attrs = dict(zarr.open_group(_resolve(dataset_path), mode="r").attrs)
-    subcarrier_spacing_hz = float(attrs["f_min_hz"]) / active_carrier_indices[0]
-    return active_carrier_indices * subcarrier_spacing_hz / 1e6
-
-
-def validation_run_evm_vs_frequency(ed_val_exp_dir, validation_run_id, active_carrier_indices):
-    validation_group = zarr.open_group(_resolve(ed_val_exp_dir) / "validation.zarr", mode="r")[validation_run_id]
-    sent_spectrum = np.fft.rfft(validation_group["sent_time"][:], norm="ortho", axis=-1)[:, active_carrier_indices]
-    received_spectrum = np.fft.rfft(validation_group["received_time"][:], norm="ortho", axis=-1)[:, active_carrier_indices]
-    residual_power = np.mean(np.abs(sent_spectrum - received_spectrum) ** 2, axis=0)
-    signal_power = np.mean(np.abs(sent_spectrum) ** 2, axis=0)
-    return np.sqrt(residual_power / (signal_power + 1e-12)) * 100.0
-
-
-def best_validation_run_for_channel(ed_val_exp_dir, channel_run_id, active_carrier_indices):
-    validation_runs = _read_jsonl(_resolve(ed_val_exp_dir) / "runs.jsonl")
-    matching_validation_runs = [run for run in validation_runs if run.get("channel_run_id") == channel_run_id]
-    if not matching_validation_runs:
-        return None
-    return min(matching_validation_runs,
-               key=lambda run: float(np.nanmean(validation_run_evm_vs_frequency(
-                   ed_val_exp_dir, run["run_id"], active_carrier_indices))))["run_id"]
-
-
 # GMP ERR: term ranking for the best GMP model at each DC bias
 def print_best_gmp_err(run_configs: list[dict]) -> None:
     """Grab the best-performing GMP channel model (lowest val RRMSE) at each DC bias
@@ -815,21 +692,21 @@ def print_best_gmp_err(run_configs: list[dict]) -> None:
             print(f"  ERR calculation failed: {e}")
 
 
-# MAIN
+
 if __name__ == "__main__":
     PLOT_PATH.mkdir(parents=True, exist_ok=True)
     run_configs = sorted(RUN_CONFIGS, key=lambda c: c["dc_ma"])
 
-    print("Plot 1 - Val RRMSE vs Sent Power ...")
+    print("Plot 1: Val RRMSE vs Sent Power ...")
     plot_val_rrmse_vs_power(run_configs)
 
-    print("Plot 2 - Pareto: channel params vs experimental EVM% ...")
+    print("Plot 2: Pareto: channel params vs experimental EVM% ...")
     plot_pareto_evm(run_configs)
 
-    print("Plot 3 - Predicted vs actual actual EVM ...")
+    print("Plot 3: Predicted vs actual actual EVM ...")
     plot_predicted_vs_actual_evm(run_configs)
 
-    print("Plot 4 - Gaussian wave packet TCN response ...")
+    print("Plot 4: Gaussian wave packet TCN response ...")
     plot_packet_response(run_configs)
 
     # print("\nBest GMP ERR term ranking per DC bias ...")

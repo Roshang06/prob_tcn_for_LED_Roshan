@@ -1,11 +1,22 @@
 '''
-Shared run-folder bookkeeping for grid-search orchestrators: experiment_config.yaml
-manifest, resumable runs/<run_id>/ folders, runs.jsonl run table, and leaderboard.csv.
+Base class that the automatic grid searches extend.
 
-Subclasses provide `self.points` (list of {"model", "params", ...}), and override
-`_prepare()` (load data once) and `_run_point(point, run_dir, context)` (train + eval
-+ save one grid point, returning a metrics dict).
+It handles the bookkeeping shared by every sweep:
+  - Run naming: readable adj_noun names, plus a deterministic run_id (hash of
+    the point's config) so a given config always maps to the same folder.
+  - An experiment directory per sweep, cataloging the config manifest
+    (git hash, seed, host, timestamp, grid), per-run training metrics, and plots.
+  - Resumable runs: points that already have metrics.json are skipped on re-run,
+    so a crashed or interrupted sweep continues where it left off.
+  - Reproducibility: seeds random/numpy/torch and records the git hash + seed.
+  - Aggregation: one row per run in runs.jsonl, ranked into leaderboard.csv.
+
+To extend it, a subclass supplies `self.points` and overrides `_run_point()`
+(train + eval + save one point, returning a metrics dict); `_prepare()` is
+optional for loading shared data once, and `self.rank_by` sets the leaderboard
+sort key.
 '''
+
 import csv
 import hashlib
 import json
@@ -136,12 +147,7 @@ class GridSearchBase:
             self._plot_lr(run_dir, history["lr"])
 
     def _plot_history(self, run_dir: Path, history: dict):
-        '''Save a train/validation loss-vs-epoch curve under plots/ for trainable
-        models. Closed-form models pass an empty history and are skipped upstream.
-        Probabilistic models also log train_nll (true beta=0 NLL, same scale as
-        val_loss); the beta-NLL training objective then moves to a twin axis since
-        its sigma-dependent scale would flatline next to the true NLL. Uses the OO
-        Figure API so it never switches the global matplotlib backend.'''
+        '''Plots the ML training plots for the models'''
         labels = {"loss": "train", "val_loss": "validation", "train_nll": "train (true NLL)"}
         series = {k: v for k, v in history.items() if k.endswith("loss") or k == "train_nll"}
         if not series:

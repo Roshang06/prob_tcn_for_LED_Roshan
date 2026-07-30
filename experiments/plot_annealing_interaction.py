@@ -1,9 +1,9 @@
-'''Annealing interaction figure for a finished joint sweep, one panel per clip-penalty rho.
+'''
 
-Standalone on purpose: it reads only the run tables an experiment already wrote, so a figure
-can be restyled and regenerated without touching hardware or retraining anything.
+Annealing interaction figure for a finished joint sweep, one panel per clip-penalty rho.
 
-    python experiments/plot_annealing_interaction.py <experiment_dir> [-o out.png]
+python experiments/plot_annealing_interaction.py <experiment_dir> [-o out.png]
+
 '''
 import argparse
 import json
@@ -207,10 +207,6 @@ def plot_annealing_interaction(table, out_path):
             if control_cell:
                 draw_box(ax, control_x + offset, values_over_runs(control_cell),
                             color, is_control=True)
-
-
-    
-
 
         if control_rows:
             ax.axvline(100.0 + CONTROL_X_GAP_PERCENT / 2, color="#bbbbbb", lw=0.8, ls=":")

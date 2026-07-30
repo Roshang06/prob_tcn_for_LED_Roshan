@@ -130,7 +130,7 @@ class ModulateDataOFDM(FunctionalBlock):
         # bins above f_max stay zero) and irfft to a fixed-length real symbol.
         half_spectrum = np.zeros(self.baseband_fft_length // 2 + 1, dtype=complex)
         half_spectrum[self.first_data_bin : self.first_data_bin + self.num_carriers] = active_subcarriers
-        time_domain_signal = np.fft.irfft(half_spectrum, n=self.baseband_fft_length, norm='ortho') # Use sinc interpolation for smooth analog waveform
+        time_domain_signal = np.fft.irfft(half_spectrum, n=self.baseband_fft_length, norm='ortho')
 
         # Random power scaling: normalize to unit RMS then scale to U(power_min, power_max).
         # Increases training diversity
@@ -270,7 +270,7 @@ class FractionalSync(FunctionalBlock):
         self.debug = debug
 
     def estimate_delay(self, y_t, preamble, start=None):
-        '''Weighted LS fit of angle(R * conj(S)) ~ phi0 - 2*pi*f*tau over the in-band
+        '''Weighted LS fit of angle(R * conj(S)) for phi0 - 2*pi*f*tau over the in-band
         preamble bins. When start is None the integer alignment is found by correlation;
         pass a fixed start to re-measure the residual on a known window.'''
         if start is None:
@@ -280,6 +280,7 @@ class FractionalSync(FunctionalBlock):
 
         S = np.fft.rfft(preamble)
         R = np.fft.rfft(received_preamble)
+
         freqs = np.fft.rfftfreq(len(preamble), d=1.0 / self.fs)
         band = (freqs >= self.f_min) & (freqs <= self.f_max)
         theta = np.angle(R[band] * np.conj(S[band]))
@@ -297,10 +298,11 @@ class FractionalSync(FunctionalBlock):
         x.data = np.fft.irfft(np.fft.rfft(y_t) * np.exp(2j * np.pi * freqs_full * tau),
                               n=len(y_t))
 
-        # self-check: re-fit at the SAME integer window (this block only removes the
-        # sub-sample delay; the demodulator re-aligns integer offsets separately). Wrap
-        # the residual into [-0.5, 0.5] samples so a benign 1-sample offset reads as ~0
-        # and only a large *fractional* residual (noise-corrupted fit) flags the capture.
+        # Remeausure the delay on the corrected signal
+        # If the fractial delay magitude is greater than a threshhold, flag as outlier to be skipped. 
+
+        # Integer window allignment is done later
+
         residual_tau, _ = self.estimate_delay(x.data, preamble, start=start)
         residual_samples = residual_tau * self.fs
         fractional_residual = float(residual_samples - np.round(residual_samples))
@@ -361,7 +363,6 @@ class DemodulateDataOFDM(FunctionalBlock):
 
         fig, (ax_sym, ax_cp) = plt.subplots(2, 1, figsize=(12, 6), sharey=True)
 
-        # top: end of the FFT window + trailing samples (watch for next preamble leaking in)
         ax_sym.plot(n, y_t[win_end - 30:plot_end], lw=0.8)
         ax_sym.axvspan(win_end - 30, win_end, color="tab:green", alpha=0.12,
                        label="FFT window (CP removed)")
@@ -373,9 +374,6 @@ class DemodulateDataOFDM(FunctionalBlock):
         ax_sym.legend(loc="upper right")
         ax_sym.grid(True, alpha=0.3)
 
-        # bottom: original perfect preamble vs the preamble extracted from this capture,
-        # so sync/distortion is obvious. On a clean, well-synced capture the extracted
-        # preamble should track the perfect one sample-for-sample.
         preamble_start = ofdm_symbol_start - preamble_length
         recv_preamble = y_t[preamble_start : preamble_start + preamble_length]  # extracted preamble
         k = np.arange(preamble_length)
@@ -468,8 +466,7 @@ class SendAndReceiveOFDM(Chain):
 class ApplyEncoder(FunctionalBlock):
     '''
     Insert a frozen encoder after modulation: pre-distort only the OFDM symbol
-    (CP + payload) and re-prepend the pristine preamble, so hardware sync correlates
-    against an untouched template. Then rebuild the AWG waveform, clamped to +-clip_value.
+    (CP + payload).
     '''
     def __init__(self, encoder, modulate_block: ModulateDataOFDM, clip_value: float, device="cpu"):
         super().__init__(modulate_block.fs_out)
@@ -505,8 +502,7 @@ class ApplyEncoder(FunctionalBlock):
 class ApplyDecoder(FunctionalBlock):
     '''Insert a frozen decoder before demodulation: sync on the pristine preamble in the
     raw received stream, equalize only the OFDM symbol (CP + payload), and splice it back
-    so demod re-syncs on the untouched preamble and demodulates normally. Sync therefore
-    never depends on the encoder/decoder.'''
+    so demod re-syncs on the untouched preamble and demodulates normally.'''
     def __init__(self, decoder, demodulate_block: DemodulateDataOFDM, device="cpu", debug=False):
         super().__init__(demodulate_block.fs_in)
         self.decoder = decoder
@@ -648,9 +644,6 @@ class CheckChannel:
             amplitude=self._DRIVE_VPP, offset=0.0)
         self.osc.set_record_length(self._RECORD_LEN)
         self.osc.set_horizontal_scale(self._PERIODS / (10.0 * self._PROBE_HZ))
-        # _, v = self.osc.measure_waveform(channel=self.data_channel)
-        # pkpk0 = float(np.ptp(v))
-        # self.osc.configure_channel(ch=self.data_channel, scale=max(pkpk0 / 8.0, 1e-3), offset=0)
         self.osc.set_acquire_mode("AVErage", self._N_AVG)
         self.osc.resume_acquire()  # must be actively acquiring for the average to accumulate
         self.osc.select_measurement(self._MEAS_SLOT, self.data_channel, self._MEAS_TYPE)

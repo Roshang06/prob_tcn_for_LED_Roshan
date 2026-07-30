@@ -1,6 +1,6 @@
 '''
 EncoderDecoderGridSearch: trains TCN encoder/decoder pairs end-to-end against a set
-of frozen, already-trained channel models (see orchestrator.select_channel_models)
+of frozen, already-trained channel models (see channel_model.select_channel_models)
 and writes a resumable run folder in the same layout as ChannelModelGridSearch.
 
 Each encoder/decoder grid point is paired with every supplied channel model, so
@@ -77,7 +77,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         '''
         Build the E/D grid from the ENCODER_DECODER section of the config,
         paired against an already-selected list of channel_models (see
-        orchestrator.select_channel_models).
+        channel_model.select_channel_models).
 
         dataset_path overrides DATA_COLLECTION.DATASET_PATH from the config file;
         use this when the dataset was just created and the YAML still shows null.
@@ -120,14 +120,14 @@ class EncoderDecoderGridSearch(GridSearchBase):
         return ofdm_config, loaded
 
     def _build_gain_curve(self, sent, received, n_bins=48, smooth=5):
-        '''Static drive->output transfer of the real channel, binned by drive amplitude, and
-        its local gain g(a) = |d(mean output)/d(drive)|. Where the LED compresses toward
-        turn-off, g -> 0; the clip-avoidance penalty steers the encoder out of that region.
+        '''Build the channel's static transfer (mean output vs. drive amplitude, binned)
+        and its local gain g(a) = |d output / d drive|. The gain drops to ~0 where the LED
+        compresses near turn-off, which is the region the clip-avoidance penalty keeps the
+        encoder out of.
 
-        The transfer is smoothed before differentiating so the local gain is not dominated
-        by bin-to-bin sampling noise. The reference gain is the typical gain in the core
-        operating region (|drive| < 1 std), which is robust to both the compressed tail
-        (g -> 0) and the steep high-drive tail; the penalty threshold is a fraction of it.'''
+        The transfer is smoothed before differentiating to reduce bin-to-bin noise.
+        reference_gain is the median gain in the core region (|drive| < 1 std); the penalty
+        threshold is set to a fraction of it.'''
         drive = sent.reshape(-1).to(torch.float32)
         out = received.reshape(-1).to(torch.float32)
         low = torch.quantile(drive, 0.005).item()
@@ -135,7 +135,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         edges = torch.linspace(low, high, n_bins + 1, device=self.device)
         centers = 0.5 * (edges[:-1] + edges[1:])
 
-        bin_index = torch.bucketize(drive, edges).clamp(1, n_bins) - 1
+        bin_index = torch.bucketize(drive, edges).clamp(1, n_bins) - 1 # -1 shifts to 0 based indexing
         summed = torch.zeros(n_bins, device=self.device)
         counts = torch.zeros(n_bins, device=self.device)
         summed.index_add_(0, bin_index, out)
@@ -143,8 +143,8 @@ class EncoderDecoderGridSearch(GridSearchBase):
         transfer = summed / counts.clamp(min=1.0)
 
         kernel = torch.ones(smooth, device=self.device) / smooth
-        padded = torch.nn.functional.pad(transfer.view(1, 1, -1), (smooth // 2, smooth // 2), mode="replicate")
-        transfer = torch.nn.functional.conv1d(padded, kernel.view(1, 1, -1)).view(-1)
+        padded = torch.nn.functional.pad(transfer.view(1, 1, -1), (smooth // 2, smooth // 2), mode="replicate") # Use .view to add dummy batch and channel dims
+        transfer = torch.nn.functional.conv1d(padded, kernel.view(1, 1, -1)).view(-1) 
 
         gain = torch.gradient(transfer, spacing=(centers,))[0].abs()
         core = centers.abs() < drive.std()
@@ -199,10 +199,11 @@ class EncoderDecoderGridSearch(GridSearchBase):
         centers = self.gain_centers
         values = self.gain_values
         amplitude = drive.clamp(centers[0], centers[-1])
-        left = torch.bucketize(amplitude, centers).clamp(1, len(centers) - 1) - 1
+        left = torch.bucketize(amplitude, centers).clamp(1, len(centers) - 1) - 1 # 0 based indexing of left center
+        # Exception: values above the greatest center get clamped to centers[-2] such that there is valid span
         span = centers[left + 1] - centers[left]
         frac = (amplitude - centers[left]) / (span + 1e-12)
-        gain_at_drive = values[left] + frac * (values[left + 1] - values[left])
+        gain_at_drive = values[left] + frac * (values[left + 1] - values[left]) # linear interpolation of gain
         normalized_gain = gain_at_drive / (self.reference_gain + 1e-12)
         return torch.mean(torch.relu(rho - normalized_gain) ** 2)
 

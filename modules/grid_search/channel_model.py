@@ -40,8 +40,8 @@ from modules.utils import calculate_per_burst_rrmse_pct_loss, load_ofdm_dataset
 
 
 class ChannelModelGridSearch(GridSearchBase):
-    # keys consumed by the orchestrator itself, not forwarded to adapters as shared
-    _ORCHESTRATOR_KEYS = ("models", "VAL_FRACTION", "SELECTED_RUN_IDS",
+    # keys consumed by the grid search itself, not forwarded to adapters as shared
+    _GRID_CONTROL_KEYS = ("models", "VAL_FRACTION", "SELECTED_RUN_IDS",
                           "SELECTION_MODE", "PROB_SELECTION_KEY")
 
     def __init__(self,
@@ -60,9 +60,9 @@ class ChannelModelGridSearch(GridSearchBase):
         self.ofdm_config = None  # set in _prepare; needed for the frequency-resolved val plot
 
         points = expand_grid(grid_config["models"])
-        # every CHANNEL_GRID_SEARCH key except orchestrator settings is a grid-wide
+        # every CHANNEL_GRID_SEARCH key except grid-control settings is a grid-wide
         # setting (e.g. RECEPTIVE_FIELD) handed to every adapter via from_config(shared=...)
-        shared_params = {k: v for k, v in grid_config.items() if k not in self._ORCHESTRATOR_KEYS}
+        shared_params = {k: v for k, v in grid_config.items() if k not in self._GRID_CONTROL_KEYS}
         super().__init__(points, grid_config, shared_params, experiments_dir, device, seed,
                           experiment_name, run_prefix=run_prefix, extra_manifest={
                               "dataset_path": str(self.dataset_path),
@@ -126,8 +126,6 @@ class ChannelModelGridSearch(GridSearchBase):
         if isinstance(y_pred, tuple):  # TCN learn_noise: (noisy, mean, std, nu)
             y_pred = y_pred[1]
         Y = Y.to(y_pred.device)
-        # keep rRMSE consistent with training: when warm-up is excluded from the loss,
-        # exclude it from the metric too
         if getattr(adapter, "exclude_warmup", False):
             s = adapter._warmup_slice(y_pred.shape[-1])
             y_pred, Y = y_pred[..., s:], Y[..., s:]
@@ -231,8 +229,7 @@ def select_channel_models(exp_dir, mode="best", metric="val_per_burst_rrmse_pct"
         when given, exactly those runs are returned and `mode` is ignored.
     prob_metric: the ranking key for probabilistic (learn_noise) runs, e.g.
         "val_per_burst_rrmse_pct" (mean-prediction accuracy) or "val_nll"
-        (likelihood); falls back through the legacy rRMSE keys if absent.
-        Nonprob runs always rank on `metric`.
+        (likelihood); Nonprob runs always rank on `metric`.
     mode="best": the best run per channel form (model family split into
         prob/nonprob, e.g. "prob TCN" vs "nonprob TCN"), all ranked by held-out
         validation per-burst rRMSE (mean-prediction accuracy, which is what the
@@ -241,8 +238,7 @@ def select_channel_models(exp_dir, mode="best", metric="val_per_burst_rrmse_pct"
         switch or a validation split.
     mode="best_per_size": like "best" but per (form, octave size bucket)
         round(log2(num_params)), so one winner per factor-of-2 parameter tier
-        advances per form (the size-sweep selection; nuisance dims like
-        distribution/beta within a tier collapse to their best).
+        advances per form.
     mode="all": every finished run.'''
     exp_dir = Path(exp_dir)
     rows = [json.loads(line) for line in (exp_dir / "runs.jsonl").read_text().splitlines() if line.strip()]

@@ -17,4 +17,5 @@ exp_state_cache_*
 data/experiments/*
 experiments/**/*.txt
 data/logs/*
-!data/logs/.gitkeep
+!data/logs/.gitkeep*.egg-info/
+__pycache__/*.egg-info/ # ignore going forward
