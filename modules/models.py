@@ -7,39 +7,62 @@ from torch.distributions.studentT import StudentT
 import matplotlib.pyplot as plt
 
 
+
+ACTIVATIONS = {
+    "relu": nn.ReLU,
+    "gelu": nn.GELU,
+    "silu": nn.SiLU,
+    "tanh": nn.Tanh,
+    "softplus": nn.Softplus,
+}
+
+
+def make_activation(name):
+    if name not in ACTIVATIONS:
+        raise ValueError(f"unknown activation {name!r}, expected one of {sorted(ACTIVATIONS)}")
+    return ACTIVATIONS[name]()
+
+
+def maybe_weight_norm(conv, enabled):
+    '''Reparameterize a conv's weight as magnitude x direction (Salimans & Kingma 2016)
+    when enabled. Normalizes the weights'''
+    return torch.nn.utils.parametrizations.weight_norm(conv) if enabled else conv
+
+
 class TCNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation, activation, weight_norm=False):
         super().__init__()
-        self.conv = nn.Conv1d(
+        self.conv = maybe_weight_norm(nn.Conv1d(
             in_channels,
             out_channels,
             kernel_size=kernel_size,
             dilation=dilation,
             padding=0
-        )
+        ), weight_norm)
         self.padding = (kernel_size - 1) * dilation
-        self.relu = nn.ReLU()
+        self.activation = make_activation(activation)
         self.resample = None
         if in_channels != out_channels:
-            self.resample = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+            self.resample = maybe_weight_norm(nn.Conv1d(in_channels, out_channels, kernel_size=1), weight_norm)
 
     def forward(self, x):
         out = F.pad(x, (self.padding, 0))
         out = self.conv(out)
-        out = self.relu(out)
+        out = self.activation(out)
         if self.resample:
             x = self.resample(x)
         return out + x # residual connection
 
 class TCN(nn.Module):
-    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32):
+    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32,
+                 *, activation):
         super().__init__()
         layers = []
         in_channels = 1
         for i in range(nlayers):
             dilation = dilation_base ** i
             layers.append(
-                TCNBlock(in_channels, hidden_channels, kernel_size, dilation)
+                TCNBlock(in_channels, hidden_channels, kernel_size, dilation, activation)
             )
             in_channels = hidden_channels
         self.tcn = nn.Sequential(*layers)
@@ -66,22 +89,22 @@ class TCN(nn.Module):
 
 class TCN_channel(nn.Module):
     def __init__(self, nlayers=3, dilation_base=2, kernel_size=10,
-                 hidden_channels=32, learn_noise=False, gaussian=True):
+                 hidden_channels=32, learn_noise=False, gaussian=True, weight_norm=False, *, activation):
         super().__init__()
         layers = []
         in_channels = 1
         for i in range(nlayers):
             dilation = dilation_base ** i
             layers.append(
-                TCNBlock(in_channels, hidden_channels, kernel_size, dilation)
+                TCNBlock(in_channels, hidden_channels, kernel_size, dilation, activation, weight_norm=weight_norm)
             )
             in_channels = hidden_channels
         self.learn_noise = learn_noise
         self.tcn = nn.Sequential(*layers)
         if gaussian:
-            self.readout = nn.Conv1d(hidden_channels, 2, kernel_size=1) # 2 channels mean | std
+            self.readout = maybe_weight_norm(nn.Conv1d(hidden_channels, 2, kernel_size=1), weight_norm) # 2 channels mean | std
         else:
-            self.readout = nn.Conv1d(hidden_channels, 3, kernel_size=1) # 3 channels mean | std | nu
+            self.readout = maybe_weight_norm(nn.Conv1d(hidden_channels, 3, kernel_size=1), weight_norm) # 3 channels mean | std | nu
         self.kernel_size = kernel_size
         self.gaussian = gaussian
 
@@ -536,10 +559,24 @@ class GeneralizedMemoryPolynomial(memory_polynomial_channel):
         super().__init__(weights, memory_linear, memory_nonlinear, nonlinearity_order, device)
         self.cross_term_depth = cross_term_depth
 
+    def _iter_cross_shifts(self):
+        """Yield (k, j, d, shift, kind) for every cross-term, applying the causal
+        guard on leading terms."""
+        for k in range(2, self.nonlinearity_order + 1):
+            for j in range(self.memory_nonlinear + 1):
+                for d in range(1, self.cross_term_depth + 1):
+                    # lagging: powered factor further in the past
+                    yield (k, j, d, j + d, "lag")
+                    # leading: powered factor nearer the present, causal only
+                    if j - d >= 0:
+                        yield (k, j, d, j - d, "lead")
+
     def get_num_regressors(self):
+        n_cross = sum(1 for _ in self._iter_cross_shifts())
         return (
             (self.memory_linear + 1)
-            + (self.memory_nonlinear + 1) * (self.nonlinearity_order - 1) * (self.cross_term_depth + 1)
+            + (self.memory_nonlinear + 1) * (self.nonlinearity_order - 1)
+            + n_cross
         )
 
     def _create_regressors(self, X):
@@ -548,37 +585,34 @@ class GeneralizedMemoryPolynomial(memory_polynomial_channel):
 
         X_powers = {k: torch.pow(X, k) for k in range(1, self.nonlinearity_order + 1)}
         batched_regressor_cols = []
-        num_regressors = (
-            (self.memory_linear + 1) +
-            (self.memory_nonlinear + 1) * (self.nonlinearity_order - 1) * (self.cross_term_depth + 1)
-        )
+        num_regressors = self.get_num_regressors()
         regressor_length = T * B
+
+        # Linear terms
         for i in range(self.memory_linear + 1):
             X_shifted = torch.roll(X, i, dims=1)
             X_shifted[:, :i] = 0.0
             batched_regressor_cols.append(X_shifted)
 
+        # Aligned (diagonal) nonlinear terms
         for k in range(2, self.nonlinearity_order + 1):
             X_pow_k = X_powers[k]
             for j in range(self.memory_nonlinear + 1):
                 X_shifted_pow = torch.roll(X_pow_k, j, dims=1)
                 X_shifted_pow[:, :j] = 0.0
                 batched_regressor_cols.append(X_shifted_pow)
-                
-        # Cross-terms
-        for k in range(2, self.nonlinearity_order + 1):
-            X_pow_k = X_powers[k - 1]
-            for j in range(self.memory_nonlinear + 1):
-                X_shifted_base = torch.roll(X, j, dims=1)
-                X_shifted_base[:, : (j)] = 0.0
-                for d in range(1, self.cross_term_depth + 1):
-                    X_shifted_pow = torch.roll(X_pow_k, j + d, dims=1)
-                    X_shifted_pow[:, : (j + d)] = 0.0
-                    cross_term = X_shifted_pow * X_shifted_base
-                    batched_regressor_cols.append(cross_term)
 
-        stack = torch.stack(batched_regressor_cols) # [features, B, T]
-        stack = stack.permute(1, 2, 0) # [B, T, features]
+        # Cross-terms (lagging + leading), driven by the shared iterator
+        for k, j, d, shift, kind in self._iter_cross_shifts():
+            X_pow_k = X_powers[k - 1]
+            X_shifted_base = torch.roll(X, j, dims=1)
+            X_shifted_base[:, :j] = 0.0
+            X_shifted_pow = torch.roll(X_pow_k, shift, dims=1)
+            X_shifted_pow[:, :shift] = 0.0
+            batched_regressor_cols.append(X_shifted_pow * X_shifted_base)
+
+        stack = torch.stack(batched_regressor_cols)  # [features, B, T]
+        stack = stack.permute(1, 2, 0)               # [B, T, features]
         A = stack.reshape(regressor_length, num_regressors)
         return A.to(self.device)
 
@@ -587,6 +621,8 @@ class GeneralizedMemoryPolynomial(memory_polynomial_channel):
         terms = []
         linear_weights = []
         idx = 0
+
+        # Linear
         for i in range(self.memory_linear + 1):
             terms.append(f"x[{-i}]")
             linear_weights.append(weights[idx].item())
@@ -598,13 +634,13 @@ class GeneralizedMemoryPolynomial(memory_polynomial_channel):
             plt.ylabel("Weight Value")
             plt.show()
 
+        # Aligned nonlinear
         for k in range(2, self.nonlinearity_order + 1):
             k_th_weights = []
             for j in range(self.memory_nonlinear + 1):
                 terms.append(f"x[{-j}]^{k}")
                 k_th_weights.append(weights[idx].item())
                 idx += 1
-
             if plot:
                 plt.plot(k_th_weights)
                 plt.title(f"Plot of Weights Order {k} vs. Memory Length")
@@ -612,12 +648,10 @@ class GeneralizedMemoryPolynomial(memory_polynomial_channel):
                 plt.ylabel("Weight Value")
                 plt.show()
 
-        # Cross-terms
-        for k in range(2, self.nonlinearity_order + 1):
-            for j in range(self.memory_nonlinear + 1):
-                for d in range(1, self.cross_term_depth + 1):
-                    terms.append(f"x[{-(j)}] * x[{-(j + d)}]^{k - 1}")
-                    idx += 1
+        # Cross-terms (must use the same iterator as _create_regressors)
+        for k, j, d, shift, kind in self._iter_cross_shifts():
+            terms.append(f"x[{-j}] * x[{-shift}]^{k - 1}  ({kind})")
+            idx += 1
 
         weights = None
         if self.weights is not None:

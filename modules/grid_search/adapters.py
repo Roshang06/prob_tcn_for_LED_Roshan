@@ -80,7 +80,7 @@ class ChannelModel(Protocol):
 
 class TCNAdapter:
     name = "tcn"
-    ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "distribution", "learn_noise", "gaussian")
+    ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "distribution", "learn_noise", "gaussian", "activation", "weight_norm")
     TRAIN_KEYS = ("epochs", "lr", "batch_size", "factor", "patience", "min_lr", "beta_nll")
 
     def __init__(self, model: TCN_channel, train_params: dict, device: str, shared: dict = None):
@@ -88,7 +88,6 @@ class TCNAdapter:
         self.train_params = train_params
         self.device = device
         self.shared = shared or {}
-        self.exclude_warmup = bool(self.shared.get("EXCLUDE_WARMUP", False))
         self.beta_nll = float(self.train_params.get("beta_nll", self.shared.get("BETA_NLL", 0.0)))
 
     @classmethod
@@ -96,6 +95,7 @@ class TCNAdapter:
         arch = {k: params[k] for k in cls.ARCH_KEYS if k in params}
         if "distribution" in arch:
             arch.update(_DIST_TO_FLAGS[arch.pop("distribution")])
+
         model = TCN_channel(**arch).to(device)
         train_params = {k: params[k] for k in cls.TRAIN_KEYS if k in params}
         return cls(model, train_params, device, shared=shared)
@@ -107,33 +107,22 @@ class TCNAdapter:
         adapter.model.eval()
         return adapter
 
-    def _warmup_slice(self, T):
-        '''Time-index from which outputs are fully warmed up (causal RF filled). 0 when the
-        toggle is off; clamped so at least one sample always survives.'''
-        if not self.exclude_warmup:
-            return 0
-        return min(self.model.receptive_field - 1, T - 1)
-
     def _loss(self, xb, yb, beta=None):
         '''The training objective on one batch: Gaussian/Student-t NLL when the
-        model learns noise, MSE otherwise each weighted per burst by 1/P_b so
-        low-power bursts are not discounted (see _burst_power_weights). With
-        EXCLUDE_WARMUP the leading receptive-field samples are dropped before
-        the loss is taken. beta overrides self.beta_nll (used by _val_loss to
-        report the true beta=0 NLL).'''
+        model learns noise, MSE otherwise, each weighted per burst by 1/P_b so
+        low-power bursts are not discounted (see _burst_power_weights). beta
+        overrides self.beta_nll (used by _val_loss to report the true beta=0 NLL).'''
         if beta is None:
             beta = self.beta_nll
-        s = self._warmup_slice(xb.shape[-1])
         burst_weights = _burst_power_weights(xb)
         if self.model.learn_noise:
             _, y_pred, y_pred_std, y_pred_nu = self.model(xb)
-            residual = (yb - y_pred)[..., s:]
-            std = y_pred_std[..., s:]
+            residual = yb - y_pred
             if self.model.gaussian:
-                return power_weighted_gaussian_nll(residual, std, burst_weights, beta=beta)
-            return power_weighted_students_t_loss(residual, std, y_pred_nu[..., s:], burst_weights,
+                return power_weighted_gaussian_nll(residual, y_pred_std, burst_weights, beta=beta)
+            return power_weighted_students_t_loss(residual, y_pred_std, y_pred_nu, burst_weights,
                                                   beta=beta)
-        squared_error = (self.model(xb)[..., s:] - yb[..., s:]) ** 2
+        squared_error = (self.model(xb) - yb) ** 2
         return torch.mean(burst_weights[:, None] * squared_error)
 
     def _val_loss(self, X_val, Y_val) -> float:
@@ -232,7 +221,7 @@ class LRUAdapter(TCNAdapter):
     objective, and probabilistic `distribution` switch), so it reuses everything
     on TCNAdapter and only swaps in the LRU_channel construction. LRU_channel
     shares TCN_channel's forward contract (mean, or (noisy, mean, std, nu)) and
-    exposes `receptive_field` (=1: an RNN has no fixed warm-up window).
+    exposes `receptive_field` (=1: an RNN has no fixed lookback window).
     '''
     name = "lru"
     ARCH_KEYS = ("state_dim", "hidden_dim", "n_layers", "dropout",

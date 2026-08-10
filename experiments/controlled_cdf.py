@@ -23,12 +23,13 @@ from pyflux.core.experiment import ExperimentalContext
 from modules.experimental_blocks import *
 from modules.constellation_diagram import get_constellation
 from modules.grid_search import (
-    EncoderDecoderGridSearch, EncoderDecoderValidation,
+    ChannelModelGridSearch, EncoderDecoderGridSearch, EncoderDecoderValidation,
     select_channel_models, select_encoder_decoders,
 )
 from modules.grid_search.base import generate_run_name
 from modules.utils import OFDMConfig
-from plot_annealing_interaction import load_sweep_table, plot_annealing_interaction
+from plot_annealing_interaction import (load_sweep_table, plot_annealing_interaction,
+                                        plot_penalty_sweep_figures)
 
 HERE = Path(__file__).resolve().parent
 
@@ -48,13 +49,8 @@ FORM_MARKER = {
 }
 NONPROB_COLOR = "#000000"
 ANNEAL_CMAP = "plasma"
-CLIP_PENALTY_CMAP = "plasma"
 
-# marker shape encodes rho in the clip figure, assigned in ascending rho order, so traces
-# sharing a rho stay recognizable even where the colour ramp separates them
-CLIP_RHO_MARKERS = ("o", "s", "^", "D", "v", "P")
-
-BASELINE_CLIP_WEIGHT = 0.0
+BASELINE_PENALTY_WEIGHT = 0.0
 BASELINE_ANNEAL = 1.0
 
 
@@ -78,66 +74,51 @@ def _fixed_ed_grid_config():
 
 def build_seed_swept_grid(seeds, anneal_starts):
     '''Fixed training architecture plus a seed axis and a noise_anneal_start axis, so seed
-    and annealing are the only sources of variation. The clip penalty is forced off rather
-    than inherited from the config, so this sweep measures annealing alone and does not shift
-    underneath the result when the ENCODER_DECODER penalty settings are edited.'''
+    and annealing are the only sources of variation.'''
     grid_config = _fixed_ed_grid_config()
     grid_config["params"]["seed"] = list(seeds)
     grid_config["params"]["noise_anneal_start"] = list(anneal_starts)
-    grid_config["params"]["clip_penalty_weight"] = BASELINE_CLIP_WEIGHT
     return grid_config
 
 
-def build_clip_swept_grid(seeds, anneal_start, rhos, clip_weights):
-    '''Fixed training architecture and a single annealing value (the empirical best from the
-    annealing sweep), swept over the cartesian product of clip-penalty rho and weight plus a
-    seed axis. A weight-0 arm rides along as the no-penalty control; its rho duplicates are
-    dropped in keep_clip_sweep_points, since rho does nothing once the weight is 0.'''
-    grid_config = _fixed_ed_grid_config()
-    params = grid_config["params"]
-    params["seed"] = list(seeds)
-    params["noise_anneal_start"] = float(anneal_start)
-    params["clip_penalty_rho"] = list(rhos)
-    params["clip_penalty_weight"] = [BASELINE_CLIP_WEIGHT] + list(clip_weights)
-    return grid_config
+# penalty families the sweep can compare
+PENALTY_FAMILIES = (
+    ("DRIVE_MEAN_POWER_WEIGHTS", "drive_mean_power_weight", "drive mean power weight"),
+    ("KURTOSIS_WEIGHTS", "kurtosis_weight", "kurtosis weight"),
+)
 
 
-def build_joint_swept_grid(seeds, anneal_starts, rhos, clip_weights):
-    '''Full factorial over annealing and the clip penalty: seed x noise_anneal_start x rho x
-    weight. the control for this comparison is the deterministic channel, which keep_joint_sweep_points keeps.'''
+def build_penalty_swept_grid(seeds, anneal_starts, family_weights):
+    '''Seed x noise_anneal_start x one penalty at a time, plus a plain no-penalty reference.
+    family_weights maps each E/D penalty param to its weights.'''
     grid_config = _fixed_ed_grid_config()
     params = grid_config["params"]
     params["seed"] = list(seeds)
     params["noise_anneal_start"] = list(anneal_starts)
-    params["clip_penalty_rho"] = list(rhos)
-    params["clip_penalty_weight"] = list(clip_weights)
+    for param, weights in family_weights.items():
+        params[param] = [BASELINE_PENALTY_WEIGHT] + list(weights)
     return grid_config
 
 
-def keep_joint_sweep_points(points, prob_channel_ids):
-    '''Prob channels get the whole annealing axis. Annealing is inert on a deterministic
-    channel, so those are pinned to a single value and become the control column: same rho and
-    weight sweep, no stochastic channel to anneal.'''
-    kept = []
-    for point in points:
-        is_prob = point["channel_run_id"] in prob_channel_ids
-        if is_prob or float(point["params"]["noise_anneal_start"]) == BASELINE_ANNEAL:
-            kept.append(point)
-    return kept
+def keep_penalty_sweep_points(points, prob_channel_ids, penalty_params,
+                              combined_mean_power_weight=None):
+    '''Prob channels only, since annealing is inert on a deterministic channel. At most one
+    penalty is active per run, so the families stay separable.
 
-
-def keep_clip_sweep_points(points, prob_channel_ids, baseline_rho):
-    '''The clip penalty is a statement about the probabilistic channel's gain curve, so the
-    sweep runs on prob channels only. The weight-0 control is kept at a single rho, since the
-    rho variants would train identical E/Ds.'''
+    combined_mean_power_weight additionally keeps kurtosis runs that carry that one mean-power weight. The
+    kurtosis penalty is scale free, so on its own it leaves the drive amplitude to the data
+    loss; pinning mean power fixes the amplitude and isolates drive shape as the only variable.'''
     kept = []
     for point in points:
         if point["channel_run_id"] not in prob_channel_ids:
             continue
 
         params = point["params"]
-        is_baseline = float(params["clip_penalty_weight"]) == BASELINE_CLIP_WEIGHT
-        if is_baseline and float(params["clip_penalty_rho"]) != baseline_rho:
+        active = [name for name in penalty_params if float(params.get(name, 0.0)) > 0]
+        combined = (combined_mean_power_weight is not None
+                    and sorted(active) == ["drive_mean_power_weight", "kurtosis_weight"]
+                    and float(params["drive_mean_power_weight"]) == combined_mean_power_weight)
+        if len(active) > 1 and not combined:
             continue
 
         kept.append(point)
@@ -200,184 +181,6 @@ def plot_per_form_ecdf(validation_exp_dir, ed_exp_dir, out_path):
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
 
 
-def _clip_settings(row):
-    '''(rho, weight) of a validation row. An E/D trained without the penalty in its params
-    records both as null, which reads here as the inert weight-0 setting.'''
-    return (float(row.get("clip_penalty_rho") or 0.0),
-            float(row.get("clip_penalty_weight") or 0.0))
-
-
-def _clip_penalty_colormap(products):
-    '''Colour scale over the rho * weight product, which is the natural ordering of penalty
-    strength: rho sets how much of the gain curve is penalized and the weight sets how hard.
-    '''
-    cmap = ListedColormap(colormaps[CLIP_PENALTY_CMAP](np.linspace(0.12, 0.88, 256)))
-    unique_products = sorted(set(products))
-    if len(unique_products) < 2:
-        return cmap, Normalize(vmin=0.0, vmax=1.0)
-    return cmap, LogNorm(vmin=min(unique_products), vmax=max(unique_products))
-
-
-def plot_clip_penalty_ecdf(validation_exp_dir, out_path):
-    '''ECDF of validation EVM over the clip-penalty sweep, one trace per (rho, weight) pair.
-    Colour tracks the rho * weight product and marker shape tracks rho alone, so traces
-    sharing a rho stay visually grouped where the colour ramp puts them far apart. The
-    weight-0 arm is the no-penalty control, a black dashed baseline as in the annealing
-    figure, marked with an x since it has no rho.'''
-    val_rows = _read_jsonl(Path(validation_exp_dir) / "runs.jsonl")
-
-    groups = {}
-    for row in val_rows:
-        rho, weight = _clip_settings(row)
-        key = (rho, weight) if weight > 0.0 else None
-        groups.setdefault(key, []).append(float(row["evm_pct"]))
-
-    penalty_keys = [key for key in groups if key is not None]
-    cmap, norm = _clip_penalty_colormap([rho * weight for rho, weight in penalty_keys])
-    rho_values = sorted({rho for rho, _ in penalty_keys})
-    marker_for_rho = {rho: CLIP_RHO_MARKERS[index % len(CLIP_RHO_MARKERS)]
-                      for index, rho in enumerate(rho_values)}
-
-    fig = Figure(figsize=(7.5, 5))
-    ax = fig.subplots()
-    legend_handles = []
-    # ascending penalty strength, no-penalty control last
-    for key in sorted(groups, key=lambda k: (k is None, k[0] * k[1] if k is not None else 0.0)):
-        evms = np.sort(groups[key])
-        quantiles = np.arange(1, len(evms) + 1) / len(evms)
-
-        if key is None:
-            color, linestyle, marker = NONPROB_COLOR, "--", "x"
-            label = f"no clip penalty (n={len(evms)})"
-        else:
-            rho, weight = key
-            color, linestyle, marker = cmap(norm(rho * weight)), "-", marker_for_rho[rho]
-            label = f"rho={rho:g}, weight={weight:g} (n={len(evms)})"
-
-        ax.step(np.concatenate([[evms[0]], evms]),
-                np.concatenate([[0.0], quantiles]),
-                where="post", color=color, lw=1.6, linestyle=linestyle)
-        ax.plot(evms, quantiles, linestyle="none", marker=marker, color=color, ms=6)
-
-        legend_handles.append(Line2D([], [], color=color, marker=marker, ms=6,
-                                     lw=1.6, linestyle=linestyle, label=label))
-
-    ax.set_xlabel("Validation EVM (%)")
-    ax.set_ylabel("P(EVM <= x)")
-    ax.set_ylim(0, 1.02)
-    ax.grid(True, alpha=0.3)
-    ax.legend(handles=legend_handles, fontsize=8, frameon=False, loc="lower right")
-    ax.set_title("Validation EVM ECDF for the Clip Penalty Sweep")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=130, bbox_inches="tight")
-
-
-def validated_clip_settings(validation_exp_dir):
-    '''Every (rho, weight) pair with an active penalty that actually validated, ordered by
-    penalty strength so the per-setting drive figures read as a sequence.'''
-    settings = {_clip_settings(row) for row in _read_jsonl(Path(validation_exp_dir) / "runs.jsonl")}
-    active = [(rho, weight) for rho, weight in settings if weight > 0.0]
-    return sorted(active, key=lambda setting: (setting[0] * setting[1], setting))
-
-
-def collect_encoder_drives(validation_exp_dir, run_ids):
-    '''Every encoder drive sample measured over the validation trials of the given runs,
-    flattened into one amplitude population.'''
-    val_group = zarr.open_group(Path(validation_exp_dir) / "validation.zarr", mode="r")
-    drives = [np.asarray(val_group[run_id]["encoder_drive"]).reshape(-1)
-              for run_id in run_ids if run_id in val_group]
-    if not drives:
-        raise ValueError(f"no stored encoder drives for {run_ids} in {validation_exp_dir}")
-    return np.concatenate(drives)
-
-
-def _penalty_active_intervals(centers, normalized_gain, rho):
-    '''Contiguous drive-amplitude ranges where the normalized channel gain sits below rho, so
-    the one-sided penalty is pushing on the encoder. The gain is a numerical derivative of a
-    binned transfer estimate, so it dips under rho over several disjoint ranges even where the
-    transfer itself is monotonic; each range is returned rather than just its onset.'''
-    bin_width = float(np.mean(np.diff(centers)))
-    below = normalized_gain < rho
-    intervals = []
-    run_start = None
-
-    for index, is_below in enumerate(below):
-        if is_below and run_start is None:
-            run_start = index
-        elif not is_below and run_start is not None:
-            intervals.append((float(centers[run_start]) - bin_width / 2,
-                              float(centers[index - 1]) + bin_width / 2))
-            run_start = None
-
-    if run_start is not None:
-        intervals.append((float(centers[run_start]) - bin_width / 2,
-                          float(centers[-1]) + bin_width / 2))
-    return intervals
-
-
-def plot_clip_drive_distribution(validation_exp_dir, gain_curve_path, rho, weight,
-                                 clip_threshold, out_path):
-    '''What the clip penalty actually does to the encoder, in one figure: the measured drive
-    amplitude distribution with and without the penalty, over the channel transfer curve that
-    the penalty is derived from and the penalty curve itself. Both curves are normalized to
-    unit peak, since only their shape against the drive axis matters here.'''
-    val_rows = _read_jsonl(Path(validation_exp_dir) / "runs.jsonl")
-
-    clip_run_ids = [row["run_id"] for row in val_rows if _clip_settings(row) == (rho, weight)]
-    no_clip_run_ids = [row["run_id"] for row in val_rows
-                       if _clip_settings(row)[1] == BASELINE_CLIP_WEIGHT]
-    if not clip_run_ids:
-        raise ValueError(f"no validated runs at rho={rho}, weight={weight} in {validation_exp_dir}")
-
-    clip_drives = collect_encoder_drives(validation_exp_dir, clip_run_ids)
-    no_clip_drives = collect_encoder_drives(validation_exp_dir, no_clip_run_ids)
-
-    curve = np.load(gain_curve_path)
-    centers = curve["centers"]
-    normalized_transfer = curve["transfer"] / (np.max(np.abs(curve["transfer"])) + 1e-12)
-    normalized_gain = curve["gain"] / (float(curve["reference_gain"]) + 1e-12)
-    penalty = np.maximum(rho - normalized_gain, 0.0) ** 2
-    normalized_penalty = penalty / (np.max(penalty) + 1e-12)
-
-    cmap, norm = _clip_penalty_colormap([rho * weight])
-    clip_color = cmap(norm(rho * weight))
-
-    fig = Figure(figsize=(8, 5))
-    drive_ax = fig.subplots()
-    curve_ax = drive_ax.twinx()
-
-    bins = np.linspace(-clip_threshold, clip_threshold, 121)
-    drive_ax.hist(clip_drives, bins=bins, density=True, color=clip_color, alpha=0.55,
-                  label=f"drive, clip penalty (rho={rho:g}, weight={weight:g})")
-    drive_ax.hist(no_clip_drives, bins=bins, density=True, color=NONPROB_COLOR, alpha=0.35,
-                  label="drive, no clip penalty")
-
-    curve_ax.plot(centers, normalized_transfer, color="#0072B2", lw=1.8,
-                  label="channel transfer (normalized)")
-    curve_ax.plot(centers, normalized_penalty, color="#D55E00", lw=1.8, ls="-.",
-                  label="clip penalty loss (normalized)")
-
-    for index, (low, high) in enumerate(_penalty_active_intervals(centers, normalized_gain, rho)):
-        drive_ax.axvspan(low, high, color="#020201", alpha=0.12, lw=0, zorder=0,
-                         label=f"penalty active (gain < rho = {rho:g})" if index == 0 else None)
-
-    drive_ax.set_xlim(-clip_threshold, clip_threshold)
-    drive_ax.set_xlabel("Encoder drive amplitude (V)")
-    drive_ax.set_ylabel("Drive amplitude density")
-    curve_ax.set_ylabel("Normalized transfer / penalty")
-    drive_ax.grid(True, alpha=0.3)
-
-    drive_handles, drive_labels = drive_ax.get_legend_handles_labels()
-    curve_handles, curve_labels = curve_ax.get_legend_handles_labels()
-    drive_ax.legend(drive_handles + curve_handles, drive_labels + curve_labels,
-                    fontsize=8, frameon=False, ncol=2,
-                    loc="upper center", bbox_to_anchor=(0.5, -0.13))
-    drive_ax.set_title("Encoder drive distribution against the channel transfer and clip penalty\n"
-                       f"(rho={rho:g}, weight={weight:g})")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=130, bbox_inches="tight")
-
-
 if __name__ == "__main__":
     RUN_NAME = generate_run_name()
 
@@ -398,19 +201,33 @@ if __name__ == "__main__":
         noise_floor_points = int(getattr(test_cfg, "NOISE_FLOOR_POINTS", 0) or 0)
 
         run_annealing_sweep = bool(getattr(test_cfg, "RUN_ANNEALING_SWEEP", True))
-        run_clip_penalty_sweep = bool(getattr(test_cfg, "RUN_CLIP_PENALTY_SWEEP", False))
-        run_joint_sweep = bool(getattr(test_cfg, "RUN_JOINT_SWEEP", False))
-        if not any((run_annealing_sweep, run_clip_penalty_sweep, run_joint_sweep)):
+        run_penalty_sweep = bool(getattr(test_cfg, "RUN_PENALTY_SWEEP", False))
+        if not any((run_annealing_sweep, run_penalty_sweep)):
             Exp.log("every CONTROLLED_CDF sweep is disabled, nothing to do")
             raise SystemExit(0)
 
-        channel_exp_dir = getattr(test_cfg, "CHANNEL_EXP_DIR", None)
-        if not channel_exp_dir:
-            raise ValueError("CONTROLLED_CDF needs CHANNEL_EXP_DIR set to a finished "
-                             "channel_models_ directory")
-        channel_exp_dir = Path(channel_exp_dir)
         dataset_path = cfg.DATASET_PATH
         exclude_models = [m.lower() for m in (getattr(test_cfg, "EXCLUDE_MODELS", None) or [])]
+
+        channel_exp_dir = getattr(test_cfg, "CHANNEL_EXP_DIR", None)
+        if channel_exp_dir:
+            channel_exp_dir = Path(channel_exp_dir)
+        else:
+            # no finished grid to reuse, so train one here. 
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                channel_grid_config = yaml.safe_load(f)["CHANNEL_GRID_SEARCH"]
+            channel_grid_config["models"] = [entry for entry in channel_grid_config["models"]
+                                             if entry["model"].lower() not in exclude_models]
+            if not channel_grid_config["models"]:
+                raise ValueError(f"EXCLUDE_MODELS {exclude_models} removed every channel model "
+                                 "from CHANNEL_GRID_SEARCH, nothing left to train")
+
+            trained_forms = sorted({entry["model"] for entry in channel_grid_config["models"]})
+            Exp.log(f"no CHANNEL_EXP_DIR set: training channel models here ({trained_forms})")
+            channel_exp_dir = ChannelModelGridSearch(
+                channel_grid_config, dataset_path=dataset_path, experiments_dir=EXP_DIR,
+                device=device, seed=seed, run_prefix=RUN_NAME).run()
+            Exp.log(f"trained channel models: {channel_exp_dir}")
 
         # one best channel model per form: (gmp), (prob/nonprob TCN), (prob/nonprob LRU)
         best_channels = select_channel_models(channel_exp_dir, mode="best")
@@ -562,44 +379,26 @@ if __name__ == "__main__":
                 build_seed_swept_grid(seeds, anneal_starts), keep_anneal_points, "anneal")
             plot_per_form_ecdf(anneal_val_dir, anneal_ed_dir, parent_dir / "per_form_evm_ecdf.png")
         else:
-            Exp.log("annealing sweep disabled, going straight to the clip-penalty sweep")
+            Exp.log("annealing sweep disabled, going straight to the penalty sweep")
 
-        if run_clip_penalty_sweep:
-            rhos = list(test_cfg["RHOS"])
-            clip_weights = list(test_cfg["CLIP_WEIGHTS"])
-            clip_sweep_anneal_start = float(test_cfg.CLIP_SWEEP_ANNEAL_START)
-            Exp.log(f"clip-penalty sweep rhos={rhos} weights={clip_weights} at "
-                    f"anneal={clip_sweep_anneal_start} (prob channels only, plus a "
-                    f"weight-{BASELINE_CLIP_WEIGHT:g} control)")
-            clip_ed_dir, clip_val_dir = train_and_validate(
-                build_clip_swept_grid(seeds, clip_sweep_anneal_start, rhos, clip_weights),
-                lambda points: keep_clip_sweep_points(points, prob_channel_ids, float(rhos[0])),
-                "clip")
+        if run_penalty_sweep:
+            families = {param: [float(w) for w in (test_cfg[key] or [])]
+                        for key, param, _ in PENALTY_FAMILIES if test_cfg[key]}
+            if not families:
+                raise ValueError("the penalty sweep needs weights for at least one of "
+                                 f"{[key for key, _, _ in PENALTY_FAMILIES]}")
+            combined_mean_power_weight = getattr(test_cfg, "COMBINED_MEAN_POWER_WEIGHT", None)
+            combined_mean_power_weight = float(combined_mean_power_weight) if combined_mean_power_weight else None
+            Exp.log(f"penalty sweep anneal={anneal_starts} families={families}, against a "
+                    f"plain no-penalty reference (one penalty at a time, prob channels only). "
+                    f"kurtosis is also swept on top of mean power pinned at "
+                    f"{combined_mean_power_weight}")
+            penalty_ed_dir, penalty_val_dir = train_and_validate(
+                build_penalty_swept_grid(seeds, anneal_starts, families),
+                lambda points: keep_penalty_sweep_points(points, prob_channel_ids,
+                                                              families, combined_mean_power_weight),
+                "penalty")
 
-            plot_clip_penalty_ecdf(clip_val_dir, parent_dir / "clip_penalty_evm_ecdf.png")
-
-            # one drive figure per penalty setting, each against the same weight-0 control,
-            # so the settings can be compared by flipping between the files
-            for plot_rho, plot_weight in validated_clip_settings(clip_val_dir):
-                out_path = parent_dir / f"clip_drive_rho{plot_rho:g}_weight{plot_weight:g}.png"
-                plot_clip_drive_distribution(
-                    clip_val_dir, clip_ed_dir / "gain_curve.npz",
-                    rho=plot_rho, weight=plot_weight,
-                    clip_threshold=float(cfg.CLIP_THRESHOLD),
-                    out_path=out_path)
-                Exp.log(f"drive distribution rho={plot_rho:g} weight={plot_weight:g} -> {out_path.name}")
-
-        if run_joint_sweep:
-            rhos = list(test_cfg["RHOS"])
-            clip_weights = list(test_cfg["CLIP_WEIGHTS"])
-            Exp.log(f"joint sweep anneal={anneal_starts} rhos={rhos} weights={clip_weights} "
-                    f"(nonprob channels pinned to anneal {BASELINE_ANNEAL} as the control)")
-            joint_ed_dir, joint_val_dir = train_and_validate(
-                build_joint_swept_grid(seeds, anneal_starts, rhos, clip_weights),
-                lambda points: keep_joint_sweep_points(points, prob_channel_ids),
-                "joint")
-
-            plot_annealing_interaction(load_sweep_table(parent_dir),
-                                       parent_dir / "annealing_interaction.png")
+            plot_penalty_sweep_figures(load_sweep_table(penalty_val_dir), parent_dir)
 
         Exp.log(f"controlled-CDF complete: {parent_dir}")

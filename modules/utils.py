@@ -49,6 +49,10 @@ class OFDMConfig:
         self.subcarrier_freqs_hz = self.subcarrier_freqs_hz.to(device)
         return self
 
+    @property
+    def baseband_sampling_rate(self) -> float:
+        return self.baseband_fft_length * self.subcarrier_spacing
+
 def symbols_to_time(X,
                     num_left_padding_zeros: int,
                     num_right_padding_zeros: int,

@@ -37,23 +37,40 @@ RUN_CONFIGS = [
     {
         "label": "50 mA",
         "dc_ma": 50,
-        "channel_exp_dir": "data/experiments/train_and_validate/fresh_echo_channel_models_20260716_1726",
-        "ed_exp_dir":      "data/experiments/train_and_validate/fresh_echo_encoder_decoder_20260717_0644",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/fresh_echo_ed_validation_20260717_0751",
-        "dataset_path":    "data/sweeps/fresh_echo_dc0.05A_fmin1e+06_fmax7.6e+06_20260715_1828.zarr",
+        "channel_exp_dir": "data/experiments/train_and_validate/raw_storm_channel_models_20260808_1526",
+        "ed_exp_dir":      "data/experiments/train_and_validate/raw_storm_encoder_decoder_20260809_0306",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/raw_storm_ed_validation_20260809_0426",
+        "dataset_path":    "data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr",
     },
-    # add more DC offsets here, e.g.:
-    # {
-    #     "label": "80mA",
-    #     "dc_ma": 80,
-    #     "channel_exp_dir": "data/experiments/train_and_validate/channel_models_YYYYMMDD_HHMM",
-    #     "ed_val_exp_dir":  "data/experiments/train_and_validate/ed_validation_YYYYMMDD_HHMM",
-    #     "dataset_path":    "data/sweeps/<filename>.zarr",
-    # },
+    {
+        "label": "60 mA",
+        "dc_ma": 60,
+        "channel_exp_dir": "data/experiments/train_and_validate/rich_arc_channel_models_20260805_1458",
+        "ed_exp_dir":      "data/experiments/train_and_validate/rich_arc_encoder_decoder_20260806_0021",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/rich_arc_ed_validation_20260806_0449",
+        "dataset_path":    "data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr",
+    },
+    {
+        "label": "80 mA",
+        "dc_ma": 80,
+        "channel_exp_dir": "data/experiments/train_and_validate/rich_arc_channel_models_20260805_1458",
+        "ed_exp_dir":      "data/experiments/train_and_validate/rich_arc_encoder_decoder_20260806_0021",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/rich_arc_ed_validation_20260806_0449",
+        "dataset_path":    "data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr",
+    },
+    {
+        "label": "120 mA",
+        "dc_ma": 120,
+        "channel_exp_dir": "data/experiments/train_and_validate/rich_arc_channel_models_20260805_1458",
+        "ed_exp_dir":      "data/experiments/train_and_validate/rich_arc_encoder_decoder_20260806_0021",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/rich_arc_ed_validation_20260806_0449",
+        "dataset_path":    "data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr",
+    },
+
 ]
 
 PLOT_PATH       = Path(__file__).resolve().parent.parent / "data/plots"
-DEVICE          = "cpu"
+DEVICE          = os.environ.get("SUMMARIZE_DEVICE", "cpu")
 N_POWER_BINS    = 10       # bins for plot 1
 MAX_QQ_SAMPLES  = 10_000  # downsample for Q-Q speed
 SHOW_RUN_IN_TITLE = True # Turn false for final manuscript plots
@@ -162,7 +179,7 @@ def load_channel_runs(channel_exp_dir: str) -> list[dict]:
     for row in rows:
         distribution = row.get("distribution") or "none"
         row["is_tcn"] = row.get("model") == "tcn"
-        row["is_prob"] = row["is_tcn"] and distribution in ("gaussian", "students_t")
+        row["is_prob"] = distribution in ("gaussian", "students_t")
     return rows
 
 
@@ -244,16 +261,16 @@ def _binned_rrmse(
     Y: torch.Tensor,
     adapter,
     n_bins: int = N_POWER_BINS,
+  
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute per-bin per-burst RRMSE (%) binned by sent-power (mean squared amplitude)."""
     power = X.square().mean(dim=-1)
-    bin_edges = torch.linspace(power.min(), power.max(), n_bins + 1)
+    bin_edges = torch.linspace(power.min(), power.max(), n_bins + 1, device=power.device)
     bin_index = torch.bucketize(power, bin_edges)
     bin_centers = (0.5 * (bin_edges[:-1] + bin_edges[1:])).cpu().numpy()
 
     predicted = _predict_mean(adapter, X)
-    receptive_field = int(getattr(adapter.model, "receptive_field", 0))
-    target, predicted = Y[..., receptive_field:], predicted[..., receptive_field:]
+    target = Y
 
     rrmse_per_bin = []
     for bin_number in range(n_bins):
@@ -297,10 +314,9 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
                              sharex=True, sharey=True,
                              constrained_layout=True)
     axes_flat = axes.flatten()
-
     for panel_index, cfg in enumerate(run_configs):
         ax = axes_flat[panel_index]
-        X, Y, _, _ = load_dataset(cfg["dataset_path"])
+        X, Y = _load_preamble_stripped(cfg)
         runs = load_channel_runs(cfg["channel_exp_dir"])
 
         for model, dist in model_types:
@@ -324,14 +340,19 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
                 label=_model_type_label(model, dist),
             )
 
-        ax.set_title(cfg["label"] + _run_suffix(cfg), fontsize=_FONT)
+        ax.set_title(f"{cfg['dc_ma']} mA", fontsize=_FONT)
         ax.grid(True)
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
         ax.tick_params(labelbottom=True)
         if panel_index % 2 == 0:
             ax.set_ylabel("Val RRMSE (%)")
-        ax.set_xlabel("Sent Power (Mean Squared Amplitude)")
+
+        # x is shared, so only the bottom row of visible panels needs the label
+        if panel_index >= n - 2:
+            ax.set_xlabel("Sent Power (Mean Squared Amplitude)")
+
+    fig.suptitle(VAL_RRMSE_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
 
     axes_flat[0].legend(fontsize=_FONT, handlelength=3, labelspacing=0.5)
 
@@ -363,32 +384,25 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
         validation_rows = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
         trial_evms = per_trial_evm(cfg["ed_val_exp_dir"], active_carrier_indices)
 
-        # per channel model, keep the lowest-mean-EVM E/D validated against it
-        best_ed_per_channel: dict[str, dict] = {}
+        # every E/D validated against a channel model, one mean EVM per seed
+        seeds_per_channel: dict[str, list] = {}
         for validation_row in validation_rows:
             channel_run_id = validation_row.get("channel_run_id")
             if channel_run_id is None:
                 continue
             trials = trial_evms.get(validation_row["run_id"], np.array([validation_row.get("evm_pct", float("nan"))]))
-            mean_evm = float(np.nanmean(trials))
-            if channel_run_id not in best_ed_per_channel or mean_evm < best_ed_per_channel[channel_run_id]["mean_evm"]:
-                best_ed_per_channel[channel_run_id] = {"mean_evm": mean_evm, "trials": trials,
-                                                       "channel_run": channel_by_run_id.get(channel_run_id)}
+            seeds_per_channel.setdefault(channel_run_id, []).append(float(np.nanmean(trials)))
 
         traces: dict[tuple, list] = {}
-        for channel_run_id, entry in best_ed_per_channel.items():
-            channel_run = entry["channel_run"]
+        for channel_run_id, seed_evms in seeds_per_channel.items():
+            channel_run = channel_by_run_id.get(channel_run_id)
             if channel_run is None:
                 continue
-            trials = entry["trials"]
-            mean_evm = float(np.nanmean(trials))
-            standard_error = (float(np.nanstd(trials, ddof=1)) / np.sqrt(len(trials))
-                              if len(trials) > 1 else 0.0)
             key = (channel_run.get("model", "unknown"), channel_run.get("distribution") or "none")
             traces.setdefault(key, []).append({
                 "num_params": channel_run["num_params"],
-                "mean_evm": mean_evm,
-                "standard_error": standard_error,
+                "median_evm": float(np.median(seed_evms)),
+                "seed_evms": np.asarray(seed_evms),
             })
 
         for key in sorted(traces.keys(), key=_model_type_sort_key):
@@ -396,32 +410,42 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
             style = _get_style(model, dist)
             points = sorted(traces[key], key=lambda point: point["num_params"])
             param_counts = np.array([point["num_params"] for point in points], dtype=float)
-            mean_evms = np.array([point["mean_evm"] for point in points])
-            standard_errors = np.array([point["standard_error"] for point in points])
+            median_evms = np.array([point["median_evm"] for point in points])
 
-            # faint raw points; solid line tracks the pareto front (best EVM so far
-            # with increasing parameter count)
-            ax.errorbar(param_counts, mean_evms, yerr=2 * standard_errors,
-                        color=style["color"], marker=style["marker"],
-                        markersize=3, capsize=2, capthick=0.5,
-                        elinewidth=0.5, linestyle="none", zorder=2, alpha=0.3)
-            pareto_evms = np.minimum.accumulate(mean_evms)
+            # every seed as a faint dot, so the spread is the uncertainty display
+            for point in points:
+                seed_evms = point["seed_evms"]
+                ax.plot(np.full(len(seed_evms), point["num_params"]), seed_evms,
+                        linestyle="none", marker="o", markersize=SEED_DOT_SIZE,
+                        markerfacecolor=style["color"], markeredgecolor="none",
+                        alpha=SEED_DOT_ALPHA, zorder=2)
+
+            # solid line tracks the pareto front (best median so far with increasing params)
+            pareto_evms = np.minimum.accumulate(median_evms)
             ax.plot(param_counts, pareto_evms, color=style["color"], linestyle="-",
                     linewidth=1.2, alpha=0.85, zorder=3,
                     drawstyle="steps-post", label=_model_type_label(model, dist))
-            on_front = mean_evms == pareto_evms
-            ax.plot(param_counts[on_front], mean_evms[on_front], linestyle="none",
+            on_front = median_evms == pareto_evms
+            ax.plot(param_counts[on_front], median_evms[on_front], linestyle="none",
                     marker=style["marker"], markersize=3,
                     color=style["color"], alpha=0.85, zorder=4)
 
-        ax.set_title(cfg["label"] + _run_suffix(cfg), fontsize=_FONT)
-        ax.grid(True)
+        # the channel sizes were chosen one per power-of-2 bucket, so a log axis spaces
+        # them evenly instead of crowding everything below 3k into the left fifth
+        ax.set_xscale("log")
+        ax.set_title(f"{cfg['dc_ma']} mA", fontsize=_FONT)
+        ax.grid(True, which="both")
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
         ax.tick_params(labelbottom=True)
         if panel_index % 2 == 0:
             ax.set_ylabel("Experimental EVM (%)")
-        ax.set_xlabel("Channel Model Parameter Count")
+
+        # x is shared, so only the bottom row of visible panels needs the label
+        if panel_index >= n - 2:
+            ax.set_xlabel("Channel Model Parameter Count")
+
+    fig.suptitle(PARETO_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
 
     axes_flat[0].legend(fontsize=_SMALL, handlelength=2, markerscale=0.8,
                         labelspacing=0.3, borderpad=0.4)
@@ -538,14 +562,19 @@ def plot_predicted_vs_actual_evm(run_configs: list[dict]) -> None:
         ax.plot([lo, hi], [lo, hi], color="grey", ls="--", lw=0.8, zorder=1)
         ax.set_xlim(lo, hi)
         ax.set_ylim(lo, hi)
-        ax.set_title(cfg["label"] + _run_suffix(cfg), fontsize=_FONT)
+        ax.set_title(f"{cfg['dc_ma']} mA", fontsize=_FONT)
         ax.grid(True)
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
         ax.tick_params(labelbottom=True)
         if panel_index % 2 == 0:
             ax.set_ylabel("Actual EVM (%)")
-        ax.set_xlabel("Predicted EVM (%)")
+
+        # x is shared, so only the bottom row of visible panels needs the label
+        if panel_index >= n - 2:
+            ax.set_xlabel("Predicted EVM (%)")
+
+    fig.suptitle(PRED_VS_ACTUAL_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
 
     axes_flat[0].legend(fontsize=_SMALL, handlelength=1.2, markerscale=0.9,
                         labelspacing=0.3, borderpad=0.4)
@@ -561,7 +590,7 @@ def plot_packet_response(run_configs: list[dict]) -> None:
     cfg = min(run_configs, key=lambda c: c["dc_ma"])
 
     runs = load_channel_runs(cfg["channel_exp_dir"])
-    prob_runs = [r for r in runs if r["is_prob"]]
+    prob_runs = [r for r in runs if r["is_prob"] and r["is_tcn"]]
     if not prob_runs:
         print(f"[plot_packet_response] No prob TCN found for {cfg['label']}; skipping.")
         return
@@ -660,8 +689,7 @@ def plot_packet_response(run_configs: list[dict]) -> None:
     right_handles, right_labels = ax2.get_legend_handles_labels()
     ax1.legend(left_handles + right_handles, left_labels + right_labels, loc="upper right",
                fontsize=_SMALL, frameon=True, framealpha=1)
-    ax1.set_title(f"TCN Response - Gaussian Wave Packet - {cfg['label']}" + _run_suffix(cfg),
-                  fontsize=_FONT)
+    ax1.set_title(f"{PACKET_TITLE} ({cfg['dc_ma']} mA)" + _run_suffix(cfg), fontsize=_FONT)
 
     plt.tight_layout()
     plt.savefig(PLOT_PATH / "packet_response.svg", format="svg", bbox_inches="tight")

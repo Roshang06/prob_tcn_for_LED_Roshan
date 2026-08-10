@@ -286,4 +286,4 @@ if __name__ == "__main__":
                 if row.get("clip_penalty_weight") not in (None, ""):
                     clip = f"  clip_w={float(row['clip_penalty_weight']):g} rho={float(row['clip_penalty_rho']):g}"
                 print(f"    {row['run_id']}  {metric}={float(row[metric]):.6f}{extra}  "
-                      f"dist={dist}  params={row['num_params']}  t={row['train_seconds']}s{clip}")
+                      f"dist={dist}  params={row['num_params']}  t={row['train_seconds']}s")
