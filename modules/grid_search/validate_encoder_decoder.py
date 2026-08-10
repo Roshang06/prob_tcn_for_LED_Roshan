@@ -21,10 +21,10 @@ from pyflux.core.block import Signal
 from pyflux.core.chain import Chain
 from modules.experimental_blocks import ApplyEncoder, ApplyDecoder
 from modules.grid_search.base import GridSearchBase
+from modules.grid_search.encoder_decoder import ARCH_KEYS
 from modules.models import TCN
 from modules.utils import calculate_BER, evm_pct
 
-ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels")
 N_CONSTELLATION_TRIALS = 4  # trials shown in the equalization-comparison figure
 
 
@@ -51,8 +51,6 @@ class EncoderDecoderValidation(GridSearchBase):
                    "channel_run_id": m.get("channel_run_id"),
                    "channel_receptive_field": m.get("channel_receptive_field"),
                    "channel_distribution": m.get("channel_distribution", "none"),
-                   "clip_penalty_weight": m.get("clip_penalty_weight"),
-                   "clip_penalty_rho": m.get("clip_penalty_rho"),
                    "checkpoint": str(m["checkpoint"])}
                   for m in ed_models]
         super().__init__(points, {"ed_models": [m["run_id"] for m in ed_models]},
@@ -158,8 +156,6 @@ class EncoderDecoderValidation(GridSearchBase):
             "channel_run_id": point.get("channel_run_id"),
             "channel_receptive_field": point.get("channel_receptive_field"),
             "channel_distribution": point.get("channel_distribution", "none"),
-            "clip_penalty_weight": point.get("clip_penalty_weight"),
-            "clip_penalty_rho": point.get("clip_penalty_rho"),
         }
         if frac_delays:
             metrics["frac_delay_std_samples"] = float(np.std(frac_delays))
@@ -191,7 +187,8 @@ class EncoderDecoderValidation(GridSearchBase):
                                            ed_constellations, no_ed_sent, no_ed_received, freqs)
 
         if self.noise_floor_points > 0:
-            self._plot_noise_floor(run_dir, encoder, decoder, sent_syms, recv_syms, freqs)
+            metrics["noise_floor_evm_pct"] = self._plot_noise_floor(
+                run_dir, encoder, decoder, sent_syms, recv_syms, freqs)
 
         if self.higher_order_context is not None:
             self._plot_higher_order_constellation(run_dir, sent_syms, recv_syms, freqs,
@@ -247,6 +244,9 @@ class EncoderDecoderValidation(GridSearchBase):
         symbol and replaying its AWG waveform through channel -> decoder N times: with the
         transmitted waveform identical, the per-carrier variance about the mean is pure
         additive noise, measured at the same point as the end-to-end EVM.'''
+        if self.noise_floor_points < 2:
+            raise ValueError("the noise floor is a variance over replays, so it needs at least "
+                             f"2 points; NOISE_FLOOR_POINTS is {self.noise_floor_points}")
         modulate, send, measure, resample, *sync_blocks, demod = self.ofdm_blocks
 
         residual_power = np.mean(np.abs(sent_syms - recv_syms) ** 2, axis=0)
@@ -269,8 +269,10 @@ class EncoderDecoderValidation(GridSearchBase):
             out = replay_chain.run(signal)
             repeated_received.append(np.asarray(out.artifact_container["received_symbols"]))
         repeated_received = np.stack(repeated_received)
+        self._store_noise_floor(run_dir.name, repeated_received, fixed_sent)
 
-        noise_power = np.mean(np.abs(repeated_received - repeated_received.mean(axis=0)) ** 2, axis=0)
+        noise_power = (np.abs(repeated_received - repeated_received.mean(axis=0)) ** 2
+                       ).sum(axis=0) / (self.noise_floor_points - 1) # -1 for Bessel's correction
         reference_power = np.abs(fixed_sent) ** 2
         noise_floor_evm = np.sqrt(noise_power / (reference_power + 1e-12)) * 100
 
@@ -295,6 +297,7 @@ class EncoderDecoderValidation(GridSearchBase):
         fig.tight_layout()
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
         fig.savefig(run_dir / "plots" / "noise_floor_evm.png", dpi=130, bbox_inches="tight")
+        return noise_floor_mean
 
     def _symbol_constellation(self, time_symbol_with_cp, demod):
         '''FFT a [CP | payload] time-domain symbol down to the active-carrier constellation,
@@ -378,6 +381,12 @@ class EncoderDecoderValidation(GridSearchBase):
             za[:] = arr
         g.attrs["channel_form"] = channel_form
 
+    def _store_noise_floor(self, model_id, replays, reference):
+        g = self.val_group[model_id]
+        for name, arr in (("noise_floor_replays", replays), ("noise_floor_reference", reference)):
+            za = g.create_array(name, shape=arr.shape, chunks=arr.shape, dtype=arr.dtype, overwrite=True)
+            za[:] = arr
+
     def _plot_constellation(self, run_dir, sent, received, freqs, ed_run_id=None,
                             channel_form=None, channel_run_id=None, evm=None):
         sent = np.asarray(sent)
@@ -420,7 +429,7 @@ class EncoderDecoderValidation(GridSearchBase):
         ax.set_xlabel("Encoder output symbol power (RMS², config POWER units)")
         ax.set_ylabel("Frequency")
         ax.set_title(f"{run_dir.name} - encoder output power\n"
-                     f"mean RMS power = {powers.mean():.3f} (std = {powers.std():.3f}, "
+                     f"mean power = {powers.mean():.3f} (std = {powers.std():.3f}, "
                      f"n = {len(powers)})")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
@@ -520,7 +529,5 @@ def select_encoder_decoders(ed_exp_dir, channel_exp_dir=None, run_ids=None):
             "channel_form": derive_channel_form(ch_meta),
             "channel_receptive_field": ch_meta.get("receptive_field"),
             "channel_distribution": ch_meta.get("distribution", "none"),
-            "clip_penalty_weight": row.get("clip_penalty_weight"),
-            "clip_penalty_rho": row.get("clip_penalty_rho"),
         })
     return selected

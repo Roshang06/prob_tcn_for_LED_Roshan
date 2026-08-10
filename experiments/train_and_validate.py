@@ -37,7 +37,7 @@ LOG_DIR = HERE.parent / "data/logs"
 
 SELECTED_CHANNEL_RUN_IDS = None  # None -> best per family; or ["tcn_xxxx", ...]
 SELECTED_ED_RUN_IDS = None       # None -> all E/D runs; or ["tcn_ae_xxxx", ...]
-VALIDATION_TRIALS = 40
+VALIDATION_TRIALS = 20
 MAX_SYNC_RETRIES = 3             # re-collect a capture this many times if sync_outlier is flagged
 
 MEASURED_A_OFFSET = 0.000
@@ -279,8 +279,5 @@ if __name__ == "__main__":
             for row in sorted(rows, key=lambda r: float(r[metric])):
                 extra = f"  ber={float(row['ber']):.4f}" if row.get("ber") else ""
                 dist = row.get("distribution") or row.get("channel_distribution") or row.get("channel_form") or "?"
-                clip = ""
-                if row.get("clip_penalty_weight") not in (None, ""):
-                    clip = f"  clip_w={float(row['clip_penalty_weight']):g} rho={float(row['clip_penalty_rho']):g}"
                 print(f"    {row['run_id']}  {metric}={float(row[metric]):.6f}{extra}  "
-                      f"dist={dist}  params={row['num_params']}  t={row['train_seconds']}s{clip}")
+                      f"dist={dist}  params={row['num_params']}  t={row['train_seconds']}s")

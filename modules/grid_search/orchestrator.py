@@ -126,11 +126,6 @@ class ChannelModelGridSearch(GridSearchBase):
         if isinstance(y_pred, tuple):  # TCN learn_noise: (noisy, mean, std, nu)
             y_pred = y_pred[1]
         Y = Y.to(y_pred.device)
-        # keep rRMSE consistent with training: when warm-up is excluded from the loss,
-        # exclude it from the metric too
-        if getattr(adapter, "exclude_warmup", False):
-            s = adapter._warmup_slice(y_pred.shape[-1])
-            y_pred, Y = y_pred[..., s:], Y[..., s:]
         return {"per_burst_rrmse_pct": calculate_per_burst_rrmse_pct_loss(Y, y_pred)}
 
     # ----------------------------------------------------------------- run
