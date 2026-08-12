@@ -104,7 +104,7 @@ CHANNEL_GRID = {
 ENCODER_DECODER_GRID = {
     "constellation":      "qpsk",
     "preamble_amplitude": 3.0,
-    "Mix-Match_Archs": True,
+    "Mix-Match_Archs": False,
     "params": {
         "nlayers":         [2, 3],
         "dilation_base":   2,
@@ -129,7 +129,7 @@ if __name__ == "__main__":
 
     channel_gs = ChannelModelGridSearch(
         CHANNEL_GRID,
-        dataset_path="real", 
+        dataset_path="data\dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr", 
         experiments_dir=EXP_DIR,
         device=DEVICE,
         seed=SEED,
@@ -159,7 +159,7 @@ if __name__ == "__main__":
     ed_gs = EncoderDecoderGridSearch(
         ENCODER_DECODER_GRID,
         channel_models=best_channels,
-        dataset_path="synthetic",
+        dataset_path="data\dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr",
         experiments_dir=EXP_DIR,
         device=DEVICE,
         seed=SEED,
@@ -175,8 +175,10 @@ if __name__ == "__main__":
     for label, summary_dir in [("channel", channel_exp_dir), ("encoder/decoder", ed_exp_dir)]:
         lb = Path(summary_dir) / "summary" / "leaderboard.csv"
         rows = list(csv.DictReader(open(lb)))
-        print(f"\n  {label} leaderboard (sorted by rrmse_pct):")
-        for row in sorted(rows, key=lambda r: float(r["rrmse_pct"])):
+        metric = next((m for m in ("evm_pct", "per_burst_rrmse_pct", "rrmse_pct")
+                        if rows and m in rows[0]), "per_burst_rrmse_pct")  # channel ranks by rrmse, E/D by EVM
+        print(f"\n  {label} leaderboard (sorted by {metric}):")
+        for row in sorted(rows, key=lambda r: float(r[metric])):
             extra = f"  ber={float(row['ber']):.4f}" if row.get("ber") else ""
-            print(f"    {row['run_id']}  rrmse_pct={float(row['rrmse_pct']):.4f}{extra}  "
-                  f"params={row['num_params']}  t={row['train_seconds']}s")
+            print(f"    {row['run_id']}  {metric}={float(row[metric]):.6f}{extra}  "
+                    f"params={row['num_params']}  t={row['train_seconds']}s")

@@ -131,28 +131,13 @@ CHANNEL_GRID = {
                 "ridge":               1e-3,
             },
         },
-        {
-            "model": "lru",
-            "params": {
-                "state_dim":        [4, 8],
-                "hidden_dim":       8,
-                "n_layers":         2,
-                "dropout":          0.0,
-                "distribution":     "none",
-                "epochs":           100,
-                "lr":               1e-3,
-                "batch_size":       16,
-                "factor":           0.5,
-                "patience":         5,
-                "min_lr":           1e-6,
-            },
-        },
     ]
 }
 
 ENCODER_DECODER_GRID = {
     "constellation":      "qpsk",
     "preamble_amplitude": 3.0,
+    "Mix-Match_Archs": False,
     "params": {
         "nlayers":         [2, 3],
         "dilation_base":   2,
@@ -270,3 +255,23 @@ if __name__ == "__main__":
             extra = f"  ber={float(row['ber']):.4f}" if row.get("ber") else ""
             print(f"    {row['run_id']}  {metric}={float(row[metric]):.6f}{extra}  "
                   f"params={row['num_params']}  t={row['train_seconds']}s")
+
+
+"""
+{
+            "model": "lru",
+            "params": {
+                "state_dim":        [4, 8],
+                "hidden_dim":       8,
+                "n_layers":         2,
+                "dropout":          0.0,
+                "distribution":     "none",
+                "epochs":           100,
+                "lr":               1e-3,
+                "batch_size":       16,
+                "factor":           0.5,
+                "patience":         5,
+                "min_lr":           1e-6,
+            },
+        },
+"""

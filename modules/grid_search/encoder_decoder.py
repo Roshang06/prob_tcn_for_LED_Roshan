@@ -8,7 +8,7 @@ run_id encodes both the architecture params and the channel model's run_id.
 '''
 import random
 from pathlib import Path
-
+from datetime import datetime
 import numpy as np
 import torch
 import torch.optim as optim
@@ -21,7 +21,7 @@ from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
 from modules.models import TCN
-from modules.utils import (calculate_BER, calculate_rrmse_pct_loss, evm_pct, in_band_time_loss,
+from modules.utils import (calculate_BER, calculate_per_burst_rrmse_pct_loss, evm_pct, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time, correlation)
 
 ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "nonCausalPadding")
@@ -164,13 +164,19 @@ class EncoderDecoderGridSearch(GridSearchBase):
         normalized_gain = gain_at_drive / (self.reference_gain + 1e-12)
         return torch.mean(torch.relu(rho - normalized_gain) ** 2)
 
-    def _sample_batch(self, batch_size, num_bits, ofdm_config):
+    def _sample_batch(self, batch_size, num_bits, ofdm_config, preamble_dne=None):
         true_bits = np.random.randint(0, 2, size=(batch_size, num_bits))
         symbols = [self.constellation.bits_to_symbols("".join(map(str, bits))) for bits in true_bits]
         true_frame = torch.tensor(np.stack(symbols), dtype=torch.complex64, device=self.device)
         sent_time = symbols_to_time(true_frame, ofdm_config.num_leading_zeros, ofdm_config.num_trailing_zeros,
                                     negative_rail=-self.clip_threshold, positive_rail=self.clip_threshold)
         sent_time = torch.hstack((sent_time[:, -ofdm_config.cyclic_prefix_length:], sent_time))
+        if preamble_dne:
+            fs = ofdm_config.baseband_fft_length * ofdm_config.subcarrier_spacing
+            freqs = ofdm_config.subcarrier_freqs_hz
+            preamble = band_limited_zc_preamble(self.preamble_length, fs,
+                                                float(freqs.min()), float(freqs.max()), self.preamble_amplitude)
+            self.preamble = torch.tensor(preamble, dtype=torch.float32, device=self.device).unsqueeze(0)
         sent_time = torch.hstack((self.preamble.expand(batch_size, -1), sent_time))  # [preamble | CP | symbol]
         return torch.tensor(true_bits, device=self.device), sent_time
 
@@ -234,7 +240,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         if was_training:
             encoder.train(); decoder.train()
         ber = calculate_BER(recv_freq.flatten(), true_bits.flatten(), constellation=self.constellation)
-        return {"ber": ber, "rrmse_pct": calculate_rrmse_pct_loss(sent_freq, recv_freq)}
+        return {"ber": ber, "rrmse_pct": calculate_per_burst_rrmse_pct_loss(sent_freq, recv_freq)}
 
     def _run_point(self, point, run_dir, context) -> dict:
         ofdm_config, channel_models = context
@@ -348,6 +354,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         ch_model_type = f"{ch_meta.get('model', 'channel').upper()} {ch_meta.get('distribution', 'none')}"
         self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz,
                                  channel_id=point["channel_run_id"], channel_type=ch_model_type, evm=evm)
+        self._plot_constellation(run_dir, sent_freq, self._frame_to_freq(encoder(eval_sent_time), ofdm_config=ofdm_config), ofdm_config.subcarrier_freqs_hz, rec_title="encoded")
         self._plot_delay_correlation(run_dir, eval_sent_time, decoded_time_eval)
         self._plot_position_error(run_dir, eval_sent_time[:, self.preamble_length:], decoded_time_eval[:, self.preamble_length:], ofdm_config.cyclic_prefix_length)
         return metrics
@@ -381,7 +388,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
         fig.savefig(run_dir / "plots" / "clip_penalty.png", dpi=120)
 
-    def _plot_constellation(self, run_dir, sent, received, freqs, channel_id=None, channel_type=None, evm=None):
+    def _plot_constellation(self, run_dir, sent, received, freqs, channel_id=None, channel_type=None, evm=None, sent_title="Sent", rec_title="Recieved"):
         '''Sent vs received QPSK symbols on the active carriers, coloured by
         carrier frequency. Received plot overlays sent symbols as red X markers for reference.'''
         sent_np = sent.detach().cpu().numpy()
@@ -394,12 +401,12 @@ class EncoderDecoderGridSearch(GridSearchBase):
         fig = Figure(figsize=(11, 5))
         ax_sent, ax_recv = fig.subplots(1, 2)
         ax_sent.scatter(sent_np_flat.real, sent_np_flat.imag, s=10, c=c, cmap="viridis")
-        ax_sent.set_title("Sent")
+        ax_sent.set_title(sent_title)
         sc = ax_recv.scatter(recv_np_flat.real, recv_np_flat.imag, s=10, c=c, cmap="viridis")
         # overlay reference constellation symbols as red X's
         ax_recv.scatter(sent_np_flat.real, sent_np_flat.imag, s=30, marker="x", c="red", linewidth=1.5, alpha=0.7, label="Reference")
 
-        title = "Received"
+        title = rec_title
         if channel_id or channel_type or evm is not None:
             parts = []
             if channel_id:
@@ -408,7 +415,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
                 parts.append(channel_type)
             if evm is not None:
                 parts.append(f"EVM={evm:.2f}%")
-            title = "Received (" + " | ".join(parts) + ")"
+            title = f"{rec_title} (" + " | ".join(parts) + ")"
         ax_recv.set_title(title)
         ax_recv.legend(fontsize=8, loc="upper right")
 
@@ -420,7 +427,68 @@ class EncoderDecoderGridSearch(GridSearchBase):
         fig.colorbar(sc, ax=[ax_sent, ax_recv], label="Carrier Frequency (Hz)")
         fig.suptitle(run_dir.name)
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
-        fig.savefig(run_dir / "plots" / "constellation.png", dpi=120)
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S").replace(" ", "").replace(":", "-")
+        fig.savefig(run_dir / "plots" / f"constellation_{sent_title}_{rec_title}_{current_time}.png", dpi=120)
+
+    def _plot_constellation_enhanced_for_sv(self, run_dir, sv, py, freqs, channel_id=None, channel_type=None, evm=None):
+        '''Sent vs received QPSK symbols on the active carriers, coloured by
+        carrier frequency. Received plot overlays sent symbols as red X markers for reference.'''
+        if len(sv) < 4 or len(py) < 4:
+            raise ValueError("sv and py must each contain at least 4 frequency tensors: sent, encoded, channel output, decoded")
+
+        fig = Figure(figsize=(44, 10))
+        axes = fig.subplots(2, 8)
+
+        def plot_stage(ax, main, freqs, title, reference=None):
+            main_np = main.detach().cpu().numpy()
+            c = np.tile(freqs.detach().cpu().numpy(), main_np.shape[0])
+            main_flat = main_np.ravel()
+            ax.scatter(main_flat.real, main_flat.imag, s=10, c=c, cmap="viridis")
+            if reference != None:
+                ref_np = reference.detach().cpu().numpy()
+                ref_flat = ref_np.ravel()
+                ax.scatter(ref_flat.real, ref_flat.imag, s=30, marker="x", c="red", linewidth=1.5, alpha=0.7, label="Reference")
+                ax.legend(fontsize=8, loc="upper right")
+            ax.set_title(title)
+            ax.set_xlabel("In-Phase")
+            ax.set_ylabel("Quadrature")
+            ax.grid(True)
+            ax.set_aspect("equal", "box")
+
+        pairs = [
+            ("Sent", "Encoded", 0, 1),
+            ("Encoded", "Recieved", 1, 2),
+            ("Recieved", "Decoded", 2, 3),
+            ("Sent", "Decoded", 0, 3),
+        ]
+        rows = [(sv, "SystemVerilog"), (py, "Pytorch")]
+
+        for row_idx, (tensor_list, label) in enumerate(rows):
+            for pair_idx, (left_name, right_name, left_idx, right_idx) in enumerate(pairs):
+                left_ax = axes[row_idx, pair_idx * 2]
+                right_ax = axes[row_idx, pair_idx * 2 + 1]
+                plot_stage(left_ax, tensor_list[left_idx], freqs,
+                           f"{left_name} ({label})")
+                plot_stage(right_ax, tensor_list[right_idx], freqs,
+                           f"{right_name} ({label}) ref: {left_name}", reference=tensor_list[left_idx])
+
+        fig.colorbar(axes[0, 0].collections[0], ax=axes.flatten().tolist(), label="Carrier Frequency (Hz)")
+
+        title_parts = []
+        if channel_id:
+            title_parts.append(channel_id)
+        if channel_type:
+            title_parts.append(channel_type)
+        if evm is not None:
+            title_parts.append(f"EVM={evm:.2f}%")
+        if title_parts:
+            fig.suptitle(f"{run_dir.name} — " + " | ".join(title_parts))
+        else:
+            fig.suptitle(run_dir.name)
+
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S").replace(" ", "").replace(":", "-")
+        fig.savefig(run_dir / "plots" / f"constellation_{current_time}.png", dpi=120)
 
     def _plot_delay_correlation(self, run_dir, sent_time, decoded_time, lag_max=40):
         '''Cross-correlation between sent and decoded time signals. A causal

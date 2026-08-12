@@ -87,7 +87,7 @@ class TCN(nn.Module):
         x = xin.unsqueeze(1)    # [B,1,T]
         out = self.tcn(x)     # [B,H,T]
         out = self.readout(out).squeeze(1)
-        out = out - out.mean(dim=1, keepdim=True)  # [B,T]
+        #out = out - out.mean(dim=1, keepdim=True)  # [B,T]
         return out
 
     def get_num_params(self):
