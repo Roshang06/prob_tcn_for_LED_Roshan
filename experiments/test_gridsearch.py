@@ -119,6 +119,7 @@ CHANNEL_GRID = {
                 "factor":           0.5,
                 "patience":         5,
                 "min_lr":           1e-6,
+                "activation":       "relu",
             },
         },
         {
@@ -147,7 +148,7 @@ ENCODER_DECODER_GRID = {
         "lr":              1e-3,
         "weight_decay":    1e-5,
         "batch_size":      8,
-        "nonCausalPadding": 0
+        "activation":       "relu",
     },
 }
 

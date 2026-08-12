@@ -33,6 +33,7 @@ HERE = Path(__file__).resolve().parent
 
 CONFIG_FILE = HERE / "train_and_validate.yml"
 EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
+LOG_DIR = HERE.parent / "data/logs"
 
 
 def _read_jsonl(path):
@@ -80,7 +81,8 @@ def build_single_ed_grid(constellation_name, arch):
 if __name__ == "__main__":
     RUN_NAME = generate_run_name()
 
-    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME) as Exp:
+    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME,
+                             log_dir=LOG_DIR) as Exp:
         test_cfg = Exp.config.ENCODER_DECODER_VALIDATION.HIGHER_ORDER_TEST
         if not getattr(test_cfg, "ENABLED", False):
             Exp.log("HIGHER_ORDER_TEST.ENABLED is false, nothing to do")

@@ -24,7 +24,7 @@ from modules.models import TCN
 from modules.utils import (calculate_BER, calculate_per_burst_rrmse_pct_loss, evm_pct, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time, correlation)
 
-ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "nonCausalPadding")
+ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation")
 
 
 class EncoderDecoderGridSearch(GridSearchBase):
@@ -94,12 +94,8 @@ class EncoderDecoderGridSearch(GridSearchBase):
                    run_prefix=run_prefix)
 
     def _prepare(self, ofdm_config=None):
-        sent_data, received_data, loaded_config = load_ofdm_dataset(str(self.dataset_path), self.device)
         if ofdm_config is None:
-            ofdm_config = loaded_config
-        # one real-channel local-gain curve g(a) for the optional clip-avoidance penalty,
-        # shared across every channel model so the penalty is identical in all environments
-        self._build_gain_curve(sent_data, received_data)
+            _, _, ofdm_config = load_ofdm_dataset(str(self.dataset_path), self.device)
         # band-limited ZC preamble (identical to ModulateDataOFDM) prepended to every
         # training burst so the encoder/decoder learn to preserve it for hardware sync
         fs = ofdm_config.baseband_fft_length * ofdm_config.subcarrier_spacing
@@ -114,55 +110,6 @@ class EncoderDecoderGridSearch(GridSearchBase):
                 p.requires_grad_(False)
             loaded[run_id] = model
         return ofdm_config, loaded
-
-    def _build_gain_curve(self, sent, received, n_bins=48, smooth=5):
-        '''Static drive->output transfer of the real channel, binned by drive amplitude, and
-        its local gain g(a) = |d(mean output)/d(drive)|. Where the LED compresses toward
-        turn-off, g -> 0; the clip-avoidance penalty steers the encoder out of that region.
-
-        The transfer is smoothed before differentiating so the local gain is not dominated
-        by bin-to-bin sampling noise. The reference gain is the typical gain in the core
-        operating region (|drive| < 1 std), which is robust to both the compressed tail
-        (g -> 0) and the steep high-drive tail; the penalty threshold is a fraction of it.'''
-        drive = sent.reshape(-1).to(torch.float32)
-        out = received.reshape(-1).to(torch.float32)
-        low = torch.quantile(drive, 0.005).item()
-        high = torch.quantile(drive, 0.995).item()
-        edges = torch.linspace(low, high, n_bins + 1, device=self.device)
-        centers = 0.5 * (edges[:-1] + edges[1:])
-
-        bin_index = torch.bucketize(drive, edges).clamp(1, n_bins) - 1
-        summed = torch.zeros(n_bins, device=self.device)
-        counts = torch.zeros(n_bins, device=self.device)
-        summed.index_add_(0, bin_index, out)
-        counts.index_add_(0, bin_index, torch.ones_like(out))
-        transfer = summed / counts.clamp(min=1.0)
-
-        kernel = torch.ones(smooth, device=self.device) / smooth
-        padded = torch.nn.functional.pad(transfer.view(1, 1, -1), (smooth // 2, smooth // 2), mode="replicate")
-        transfer = torch.nn.functional.conv1d(padded, kernel.view(1, 1, -1)).view(-1)
-
-        gain = torch.gradient(transfer, spacing=(centers,))[0].abs()
-        core = centers.abs() < drive.std()
-        self.gain_centers = centers.detach()
-        self.gain_values = gain.detach()
-        self.reference_gain = float(gain[core].median())
-
-    def _clip_penalty(self, drive, rho):
-        '''Squared shortfall of the channel local gain below rho, where the gain is
-        normalized by the reference (operating-region) gain so the penalty is dimensionless
-        and rho is directly "fraction of nominal gain". A one-sided barrier, inert in the
-        linear region, differentiable w.r.t. the drive so its gradient pushes the encoder
-        toward higher-gain, invertible amplitudes.'''
-        centers = self.gain_centers
-        values = self.gain_values
-        amplitude = drive.clamp(centers[0], centers[-1])
-        left = torch.bucketize(amplitude, centers).clamp(1, len(centers) - 1) - 1
-        span = centers[left + 1] - centers[left]
-        frac = (amplitude - centers[left]) / (span + 1e-12)
-        gain_at_drive = values[left] + frac * (values[left + 1] - values[left])
-        normalized_gain = gain_at_drive / (self.reference_gain + 1e-12)
-        return torch.mean(torch.relu(rho - normalized_gain) ** 2)
 
     def _sample_batch(self, batch_size, num_bits, ofdm_config, preamble_dne=None):
         true_bits = np.random.randint(0, 2, size=(batch_size, num_bits))
@@ -275,18 +222,26 @@ class EncoderDecoderGridSearch(GridSearchBase):
         batch_size = p["batch_size"]
 
         # channel-noise annealing: full noise until noise_anneal_start * epochs, then a
-        # linear decay reaching 0 at the final epoch (robust basin early, fine
-        # equalization late). 1.0 disables annealing and reproduces prior behavior.
+        # linear decay reaching 0 at the final epoch. 
+        # 
+        # 1.0 disables annealing and reproduces prior behavior.
         epochs = int(p["epochs"])
         noise_anneal_start = float(p.get("noise_anneal_start", 1.0))
         anneal_start_epoch = int(round(noise_anneal_start * epochs))
         annealing_active = noise_anneal_start < 1.0
 
-        # optional clip-avoidance penalty: keep the encoder drive out of the channel's
-        # compressed (low-gain, non-invertible) region. weight 0 disables it (ablation).
-        clip_penalty_weight = float(p.get("clip_penalty_weight", 0.0))
-        clip_penalty_rho = float(p.get("clip_penalty_rho", 0.6))
-        use_clip_penalty = clip_penalty_weight > 0.0
+        # plain drive power
+        drive_mean_power_weight = float(p.get("drive_mean_power_weight", 0.0))
+        if drive_mean_power_weight < 0.0:
+            raise ValueError(f"drive_mean_power_weight must be >= 0, got {drive_mean_power_weight}")
+        use_drive_mean_power = drive_mean_power_weight > 0.0
+
+        kurtosis_weight = float(p.get("kurtosis_weight", 0.0))
+        if kurtosis_weight < 0.0:
+            raise ValueError(f"kurtosis_weight must be >= 0, got {kurtosis_weight}")
+        use_drive_kurtosis = kurtosis_weight > 0.0
+        if use_drive_kurtosis:
+            kurtosis_target = float(p["kurtosis_target"])
 
         # fixed held-out batch so the BER-vs-epoch curve and the final
         # constellation plot are measured on consistent data across epochs
@@ -294,9 +249,11 @@ class EncoderDecoderGridSearch(GridSearchBase):
 
         encoder.train()
         decoder.train()
-        history = {"loss": [], "ber": [], "lr": [], "noise_scale": []}
-        if use_clip_penalty:
-            history["clip_penalty"] = []
+        history = {"loss": [], "ber": [], "lr": [], "noise_scale": [], "drive_rms": []}
+        if use_drive_mean_power:
+            history["drive_power"] = []
+        if use_drive_kurtosis:
+            history["drive_kurtosis"] = []
         for epoch in range(epochs):
             if epoch < anneal_start_epoch:
                 noise_scale = 1.0
@@ -305,17 +262,20 @@ class EncoderDecoderGridSearch(GridSearchBase):
                 noise_scale = max(0.0, noise_scale)
 
             _, sent_time = self._sample_batch(batch_size, num_bits, ofdm_config)
-            forward_out = self._forward(encoder, decoder, channel_model, sent_time,
-                                        noise_scale=noise_scale, return_encoded=use_clip_penalty)
-            decoded_time, encoded_symbol = forward_out if use_clip_penalty else (forward_out, None)
+            decoded_time, encoded_symbol = self._forward(encoder, decoder, channel_model, sent_time,
+                                                         noise_scale=noise_scale, return_encoded=True)
             # loss on the OFDM symbol only; the preamble is never encoded/decoded
             offset = self.preamble_length
             loss = in_band_time_loss(sent_time[:, offset:], decoded_time[:, offset:],
                                      ofdm_config.active_carrier_indices, ofdm_config.baseband_fft_length)
 
-            if use_clip_penalty:
-                penalty = self._clip_penalty(encoded_symbol, clip_penalty_rho)
-                loss = loss + clip_penalty_weight * penalty
+            if use_drive_mean_power:
+                drive_power = encoded_symbol.pow(2).mean()
+                loss = loss + drive_mean_power_weight * drive_power
+
+            if use_drive_kurtosis:
+                drive_kurtosis = encoded_symbol.pow(4).mean() / encoded_symbol.pow(2).mean() ** 2
+                loss = loss + kurtosis_weight * (drive_kurtosis - kurtosis_target) ** 2
 
             optimizer.zero_grad()
             loss.backward()
@@ -326,8 +286,11 @@ class EncoderDecoderGridSearch(GridSearchBase):
             history["ber"].append(self._test_ber(encoder, decoder, channel_model, ofdm_config, eval_bits, eval_sent_time))
             history["lr"].append(optimizer.param_groups[0]["lr"])
             history["noise_scale"].append(noise_scale)
-            if use_clip_penalty:
-                history["clip_penalty"].append(penalty.item())
+            history["drive_rms"].append(encoded_symbol.detach().pow(2).mean().sqrt().item())
+            if use_drive_mean_power:
+                history["drive_power"].append(drive_power.item())
+            if use_drive_kurtosis:
+                history["drive_kurtosis"].append(drive_kurtosis.item())
 
         metrics = self._evaluate(encoder, decoder, channel_model, ofdm_config, num_bits, batch_size)
         metrics["num_params"] = encoder.get_num_params() + decoder.get_num_params()
@@ -341,11 +304,17 @@ class EncoderDecoderGridSearch(GridSearchBase):
         metrics["channel_receptive_field"] = ch_meta.get("receptive_field")
         metrics["channel_distribution"] = ch_meta.get("distribution", "none")
 
+        with torch.no_grad():
+            _, final_drive = self._forward(encoder.eval(), decoder.eval(), channel_model,
+                                           eval_sent_time, noise_scale=0.0, return_encoded=True)
+        drive_power = final_drive.pow(2).mean()
+        metrics["drive_rms"] = drive_power.sqrt().item()
+        metrics["drive_kurtosis"] = (final_drive.pow(4).mean() / drive_power ** 2).item()
+        metrics["drive_papr"] = (final_drive.abs().max() ** 2 / drive_power).item()
+
         torch.save({"encoder": encoder.state_dict(), "decoder": decoder.state_dict()}, run_dir / "model.pt")
         self._write_history(run_dir, history)
         self._plot_ber(run_dir, history["ber"])
-        if use_clip_penalty:
-            self._plot_clip_penalty(run_dir, history["clip_penalty"], clip_penalty_weight, clip_penalty_rho)
         with torch.no_grad():
             sent_freq = self._frame_to_freq(eval_sent_time, ofdm_config)
             decoded_time_eval = self._forward(encoder.eval(), decoder.eval(), channel_model, eval_sent_time)
@@ -372,21 +341,6 @@ class EncoderDecoderGridSearch(GridSearchBase):
         fig.tight_layout()
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
         fig.savefig(run_dir / "plots" / "ber.png", dpi=120)
-
-    def _plot_clip_penalty(self, run_dir, penalty_curve, weight, rho):
-        '''Clip-avoidance penalty (mean squared gain shortfall below rho) per epoch. A curve
-        trending toward 0 means the encoder is learning to keep its drive out of the
-        channel's compressed region.'''
-        fig = Figure(figsize=(7, 4))
-        ax = fig.subplots()
-        ax.plot(range(len(penalty_curve)), penalty_curve, marker=".", ms=3, color="#D55E00")
-        ax.set_xlabel("epoch")
-        ax.set_ylabel("clip penalty")
-        ax.set_title(f"{run_dir.name} - clip penalty vs epoch (weight={weight:g}, rho={rho:g})")
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
-        fig.savefig(run_dir / "plots" / "clip_penalty.png", dpi=120)
 
     def _plot_constellation(self, run_dir, sent, received, freqs, channel_id=None, channel_type=None, evm=None, sent_title="Sent", rec_title="Recieved"):
         '''Sent vs received QPSK symbols on the active carriers, coloured by

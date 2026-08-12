@@ -86,6 +86,7 @@ CHANNEL_GRID = {
                 "epochs":           100,
                 "lr":               1e-3,
                 "batch_size":       16,
+                "activation":       "relu",
             },
         },
         {
@@ -114,7 +115,7 @@ ENCODER_DECODER_GRID = {
         "lr":              1e-3,
         "weight_decay":    1e-5,
         "batch_size":      8,
-        "nonCausalPadding": 0
+        "activation":       "relu",
     },
 }
 

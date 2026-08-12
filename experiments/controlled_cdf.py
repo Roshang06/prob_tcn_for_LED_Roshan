@@ -1,10 +1,7 @@
 '''
 Controlled per-category CDF experiment, run after a finished train_and_validate.
 
-The train_and_validate ECDF pools every validated E/D per channel form, but the forms
-have unequal counts and their channel models span a wide fidelity range, so a form can
-look better just because its channels happened to be good. This isolates the channel
-form as the only variable: take the single best channel model of each form, train k
+take the single best channel model of each form, train k
 encoder/decoders that differ only by seed on each, and validate them all on the live
 channel. Every form then contributes exactly k runs from an equally-good channel, so
 the per-form EVM ECDFs are a fair comparison.
@@ -16,7 +13,9 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import zarr
 from matplotlib import colormaps
+from matplotlib.colors import ListedColormap, LogNorm, Normalize
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
@@ -24,16 +23,19 @@ from pyflux.core.experiment import ExperimentalContext
 from modules.experimental_blocks import *
 from modules.constellation_diagram import get_constellation
 from modules.grid_search import (
-    EncoderDecoderGridSearch, EncoderDecoderValidation,
+    ChannelModelGridSearch, EncoderDecoderGridSearch, EncoderDecoderValidation,
     select_channel_models, select_encoder_decoders,
 )
 from modules.grid_search.base import generate_run_name
 from modules.utils import OFDMConfig
+from plot_annealing_interaction import (load_sweep_table, plot_annealing_interaction,
+                                        plot_penalty_sweep_figures)
 
 HERE = Path(__file__).resolve().parent
 
 CONFIG_FILE = HERE / "train_and_validate.yml"
 EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
+LOG_DIR = HERE.parent / "data/logs"
 
 # The annealing sweep, not the model form, is the comparison here, so colour encodes the
 # annealing value (a sequential ramp, since annealing is ordered) rather than following the
@@ -48,30 +50,79 @@ FORM_MARKER = {
 NONPROB_COLOR = "#000000"
 ANNEAL_CMAP = "plasma"
 
+BASELINE_PENALTY_WEIGHT = 0.0
+BASELINE_ANNEAL = 1.0
+
 
 def _read_jsonl(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
-def build_seed_swept_grid(seeds, anneal_starts):
-    '''ENCODER_DECODER config with the training architecture fixed, plus a seed axis and a
-    noise_anneal_start axis. Other sweeps are flattened to their first value so seed and
-    annealing are the only sources of variation.'''
+def _fixed_ed_grid_config():
+    '''ENCODER_DECODER config with every sweep flattened to its first value, so the only
+    variation left is whatever axis the caller adds back.'''
     with open(CONFIG_FILE, encoding="utf-8") as f:
         full = yaml.safe_load(f)
     grid_config = {k.lower(): v for k, v in full["ENCODER_DECODER"].items()}
 
-    params = dict(grid_config["params"])
-
     def first(value):
         return value[0] if isinstance(value, list) else value
 
-    params = {key: first(value) for key, value in params.items()}
+    grid_config["params"] = {key: first(value) for key, value in grid_config["params"].items()}
+    return grid_config
+
+
+def build_seed_swept_grid(seeds, anneal_starts):
+    '''Fixed training architecture plus a seed axis and a noise_anneal_start axis, so seed
+    and annealing are the only sources of variation.'''
+    grid_config = _fixed_ed_grid_config()
+    grid_config["params"]["seed"] = list(seeds)
+    grid_config["params"]["noise_anneal_start"] = list(anneal_starts)
+    return grid_config
+
+
+# penalty families the sweep can compare
+PENALTY_FAMILIES = (
+    ("DRIVE_MEAN_POWER_WEIGHTS", "drive_mean_power_weight", "drive mean power weight"),
+    ("KURTOSIS_WEIGHTS", "kurtosis_weight", "kurtosis weight"),
+)
+
+
+def build_penalty_swept_grid(seeds, anneal_starts, family_weights):
+    '''Seed x noise_anneal_start x one penalty at a time, plus a plain no-penalty reference.
+    family_weights maps each E/D penalty param to its weights.'''
+    grid_config = _fixed_ed_grid_config()
+    params = grid_config["params"]
     params["seed"] = list(seeds)
     params["noise_anneal_start"] = list(anneal_starts)
-
-    grid_config["params"] = params
+    for param, weights in family_weights.items():
+        params[param] = [BASELINE_PENALTY_WEIGHT] + list(weights)
     return grid_config
+
+
+def keep_penalty_sweep_points(points, prob_channel_ids, penalty_params,
+                              combined_mean_power_weight=None):
+    '''Prob channels only, since annealing is inert on a deterministic channel. At most one
+    penalty is active per run, so the families stay separable.
+
+    combined_mean_power_weight additionally keeps kurtosis runs that carry that one mean-power weight. The
+    kurtosis penalty is scale free, so on its own it leaves the drive amplitude to the data
+    loss; pinning mean power fixes the amplitude and isolates drive shape as the only variable.'''
+    kept = []
+    for point in points:
+        if point["channel_run_id"] not in prob_channel_ids:
+            continue
+
+        params = point["params"]
+        active = [name for name in penalty_params if float(params.get(name, 0.0)) > 0]
+        combined = (combined_mean_power_weight is not None
+                    and sorted(active) == ["drive_mean_power_weight", "kurtosis_weight"]
+                    and float(params["drive_mean_power_weight"]) == combined_mean_power_weight)
+        if len(active) > 1 and not combined:
+            continue
+
+        kept.append(point)
+    return kept
 
 
 def plot_per_form_ecdf(validation_exp_dir, ed_exp_dir, out_path):
@@ -80,7 +131,7 @@ def plot_per_form_ecdf(validation_exp_dir, ed_exp_dir, out_path):
     nonprob channels, which stay a single black baseline trace). Marker encodes the model
     form. Colour intentionally tracks annealing, not form, since the annealing sweep is the
     comparison.'''
-    anneal_by_ed = {row["run_id"]: float(row.get("noise_anneal_start", 1.0))
+    anneal_by_ed = {row["run_id"]: float(row.get("noise_anneal_start"))
                     for row in _read_jsonl(Path(ed_exp_dir) / "runs.jsonl")}
     val_rows = _read_jsonl(Path(validation_exp_dir) / "runs.jsonl")
 
@@ -133,7 +184,8 @@ def plot_per_form_ecdf(validation_exp_dir, ed_exp_dir, out_path):
 if __name__ == "__main__":
     RUN_NAME = generate_run_name()
 
-    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME) as Exp:
+    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME,
+                             log_dir=LOG_DIR) as Exp:
         test_cfg = Exp.config.CONTROLLED_CDF
         if not getattr(test_cfg, "ENABLED", False):
             Exp.log("CONTROLLED_CDF.ENABLED is false, nothing to do")
@@ -144,15 +196,38 @@ if __name__ == "__main__":
         seed = int(Exp.config.RUNTIME.SEED)
 
         seeds = list(test_cfg.SEEDS)
-        anneal_starts = list(getattr(test_cfg, "ANNEAL_STARTS", None) or [1.0])
+        anneal_starts = list(test_cfg["ANNEAL_STARTS"])
         num_trials = int(test_cfg.N)
-        channel_exp_dir = getattr(test_cfg, "CHANNEL_EXP_DIR", None)
-        if not channel_exp_dir:
-            raise ValueError("CONTROLLED_CDF needs CHANNEL_EXP_DIR set to a finished "
-                             "channel_models_ directory")
-        channel_exp_dir = Path(channel_exp_dir)
+        noise_floor_points = int(getattr(test_cfg, "NOISE_FLOOR_POINTS", 0) or 0)
+
+        run_annealing_sweep = bool(getattr(test_cfg, "RUN_ANNEALING_SWEEP", True))
+        run_penalty_sweep = bool(getattr(test_cfg, "RUN_PENALTY_SWEEP", False))
+        if not any((run_annealing_sweep, run_penalty_sweep)):
+            Exp.log("every CONTROLLED_CDF sweep is disabled, nothing to do")
+            raise SystemExit(0)
+
         dataset_path = cfg.DATASET_PATH
         exclude_models = [m.lower() for m in (getattr(test_cfg, "EXCLUDE_MODELS", None) or [])]
+
+        channel_exp_dir = getattr(test_cfg, "CHANNEL_EXP_DIR", None)
+        if channel_exp_dir:
+            channel_exp_dir = Path(channel_exp_dir)
+        else:
+            # no finished grid to reuse, so train one here. 
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                channel_grid_config = yaml.safe_load(f)["CHANNEL_GRID_SEARCH"]
+            channel_grid_config["models"] = [entry for entry in channel_grid_config["models"]
+                                             if entry["model"].lower() not in exclude_models]
+            if not channel_grid_config["models"]:
+                raise ValueError(f"EXCLUDE_MODELS {exclude_models} removed every channel model "
+                                 "from CHANNEL_GRID_SEARCH, nothing left to train")
+
+            trained_forms = sorted({entry["model"] for entry in channel_grid_config["models"]})
+            Exp.log(f"no CHANNEL_EXP_DIR set: training channel models here ({trained_forms})")
+            channel_exp_dir = ChannelModelGridSearch(
+                channel_grid_config, dataset_path=dataset_path, experiments_dir=EXP_DIR,
+                device=device, seed=seed, run_prefix=RUN_NAME).run()
+            Exp.log(f"trained channel models: {channel_exp_dir}")
 
         # one best channel model per form: (gmp), (prob/nonprob TCN), (prob/nonprob LRU)
         best_channels = select_channel_models(channel_exp_dir, mode="best")
@@ -188,7 +263,7 @@ if __name__ == "__main__":
         osc_fs = float(cfg.OSC_SAMPLE_RATES[0])
         subcarrier_spacing = float(cfg.SUBCARRIER_SPACING)
 
-        pwr_supply.set_6V(voltage=4, current=dc_offset_A)
+        pwr_supply.set_25V(voltage=4, current=dc_offset_A)
         pwr_supply.enable_output()
         Exp.log(f"DC offset set to {dc_offset_A:.3f} A")
 
@@ -217,25 +292,8 @@ if __name__ == "__main__":
             clip_threshold=float(cfg.CLIP_THRESHOLD),
         )
 
-        grid_config = build_seed_swept_grid(seeds, anneal_starts)
-        ed_gs = EncoderDecoderGridSearch(
-            grid_config, channel_models=best_channels, dataset_path=dataset_path,
-            experiments_dir=parent_dir, experiment_name="ed_train",
-            preamble_length=int(cfg.PREAMBLE_LENGTH),
-            clip_threshold=float(cfg.CLIP_THRESHOLD),
-            device=device, seed=seed)
-
-        # annealing only affects probabilistic channels, so drop the redundant annealing
-        # variants on nonprob channels (they would retrain identical E/Ds and waste hardware)
         prob_channel_ids = {cm["run_id"] for cm in best_channels
                             if cm.get("distribution", "none") not in (None, "none")}
-        baseline_anneal = float(anneal_starts[0])
-        ed_gs.points = [pt for pt in ed_gs.points
-                        if pt["channel_run_id"] in prob_channel_ids
-                        or float(pt["params"]["noise_anneal_start"]) == baseline_anneal]
-        Exp.log(f"annealing sweep {anneal_starts} -> {len(ed_gs.points)} E/Ds "
-                f"(nonprob channels pinned to {baseline_anneal})")
-        ed_exp_dir = ed_gs.run(ofdm_config=OFDMConfig.from_modulator(mod_collection))
 
         # validation transmits its own clean constellation (no power sweep or jitter)
         val_constellation = get_constellation(Exp.config.ENCODER_DECODER_VALIDATION.CONSTELLATION)
@@ -271,27 +329,76 @@ if __name__ == "__main__":
         fractional_sync = FractionalSync(
             fs=mod_val.baseband_sampling_rate, f_min=min_freq, f_max=max_freq, debug=False)
 
-        ed_models = select_encoder_decoders(ed_exp_dir, channel_exp_dir=channel_exp_dir)
-        # shuffle so grid position (hence annealing value) is decorrelated from validation
-        # time: any slow channel drift over the run spreads as noise, not an annealing bias
-        random.Random(seed).shuffle(ed_models)
+        def train_and_validate(grid_config, select_points, sweep_name):
+            '''Train one E/D grid and validate every survivor on the live channel, returning
+            the two experiment directories the plots read from.'''
+            ed_gs = EncoderDecoderGridSearch(
+                grid_config, channel_models=best_channels, dataset_path=dataset_path,
+                experiments_dir=parent_dir, experiment_name=f"ed_train_{sweep_name}",
+                preamble_length=int(cfg.PREAMBLE_LENGTH),
+                clip_threshold=float(cfg.CLIP_THRESHOLD),
+                device=device, seed=seed)
+            ed_gs.points = select_points(ed_gs.points)
+            Exp.log(f"{sweep_name} sweep -> {len(ed_gs.points)} E/Ds")
+            ed_exp_dir = ed_gs.run(ofdm_config=OFDMConfig.from_modulator(mod_collection))
 
-        check_channel.run("pre-validation")
-        osc.set_record_length(200_000)
-        osc.set_horizontal_scale(0.2 / f_AWG)
-        osc.configure_channel(ch=3, scale=cfg.OSC_SCALE, offset=0)
+            ed_models = select_encoder_decoders(ed_exp_dir, channel_exp_dir=channel_exp_dir)
+            # shuffle so grid position (hence the swept value) is decorrelated from validation
+            # time: any slow channel drift over the run spreads as noise, not as a sweep bias
+            random.Random(seed).shuffle(ed_models)
 
-        validation = EncoderDecoderValidation(
-            ed_models,
-            (mod_val, send_waveform, measure_waveform, resample_waveform,
-             fractional_sync, demod_val),
-            num_trials=num_trials,
-            constellation=val_constellation,
-            clip_value=float(cfg.CLIP_THRESHOLD),
-            device=device, seed=seed, experiments_dir=parent_dir,
-            experiment_name="ed_val", debug=False)
-        val_exp_dir = validation.run()
+            check_channel.run(f"pre-validation ({sweep_name})")
+            osc.set_record_length(200_000)
+            osc.set_horizontal_scale(0.2 / f_AWG)
+            osc.configure_channel(ch=3, scale=cfg.OSC_SCALE, offset=0)
 
-        plot_per_form_ecdf(val_exp_dir, ed_exp_dir, parent_dir / "per_form_evm_ecdf.png")
-        check_channel.run("post-validation")
+            validation = EncoderDecoderValidation(
+                ed_models,
+                (mod_val, send_waveform, measure_waveform, resample_waveform,
+                 fractional_sync, demod_val),
+                num_trials=num_trials,
+                noise_floor_points=noise_floor_points,
+                constellation=val_constellation,
+                clip_value=float(cfg.CLIP_THRESHOLD),
+                device=device, seed=seed, experiments_dir=parent_dir,
+                experiment_name=f"ed_val_{sweep_name}", debug=False)
+            val_exp_dir = validation.run()
+            check_channel.run(f"post-validation ({sweep_name})")
+            return ed_exp_dir, val_exp_dir
+
+        if run_annealing_sweep:
+            # annealing only affects probabilistic channels, so drop the redundant annealing
+            # variants on nonprob channels (they would retrain identical E/Ds and waste hardware)
+            def keep_anneal_points(points):
+                return [pt for pt in points
+                        if pt["channel_run_id"] in prob_channel_ids
+                        or float(pt["params"]["noise_anneal_start"]) == BASELINE_ANNEAL]
+
+            Exp.log(f"annealing sweep {anneal_starts} (nonprob channels pinned to {BASELINE_ANNEAL})")
+            anneal_ed_dir, anneal_val_dir = train_and_validate(
+                build_seed_swept_grid(seeds, anneal_starts), keep_anneal_points, "anneal")
+            plot_per_form_ecdf(anneal_val_dir, anneal_ed_dir, parent_dir / "per_form_evm_ecdf.png")
+        else:
+            Exp.log("annealing sweep disabled, going straight to the penalty sweep")
+
+        if run_penalty_sweep:
+            families = {param: [float(w) for w in (test_cfg[key] or [])]
+                        for key, param, _ in PENALTY_FAMILIES if test_cfg[key]}
+            if not families:
+                raise ValueError("the penalty sweep needs weights for at least one of "
+                                 f"{[key for key, _, _ in PENALTY_FAMILIES]}")
+            combined_mean_power_weight = getattr(test_cfg, "COMBINED_MEAN_POWER_WEIGHT", None)
+            combined_mean_power_weight = float(combined_mean_power_weight) if combined_mean_power_weight else None
+            Exp.log(f"penalty sweep anneal={anneal_starts} families={families}, against a "
+                    f"plain no-penalty reference (one penalty at a time, prob channels only). "
+                    f"kurtosis is also swept on top of mean power pinned at "
+                    f"{combined_mean_power_weight}")
+            penalty_ed_dir, penalty_val_dir = train_and_validate(
+                build_penalty_swept_grid(seeds, anneal_starts, families),
+                lambda points: keep_penalty_sweep_points(points, prob_channel_ids,
+                                                              families, combined_mean_power_weight),
+                "penalty")
+
+            plot_penalty_sweep_figures(load_sweep_table(penalty_val_dir), parent_dir)
+
         Exp.log(f"controlled-CDF complete: {parent_dir}")

@@ -33,10 +33,11 @@ HERE = Path(__file__).resolve().parent
 
 CONFIG_FILE = HERE / "train_and_validate.yml"
 EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
+LOG_DIR = HERE.parent / "data/logs"
 
 SELECTED_CHANNEL_RUN_IDS = None  # None -> best per family; or ["tcn_xxxx", ...]
 SELECTED_ED_RUN_IDS = None       # None -> all E/D runs; or ["tcn_ae_xxxx", ...]
-VALIDATION_TRIALS = 40
+VALIDATION_TRIALS = 20
 MAX_SYNC_RETRIES = 3             # re-collect a capture this many times if sync_outlier is flagged
 
 MEASURED_A_OFFSET = 0.000
@@ -45,7 +46,8 @@ MEASURED_A_OFFSET = 0.000
 if __name__ == "__main__":
     RUN_NAME = generate_run_name()
 
-    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME) as Exp:
+    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME,
+                             log_dir=LOG_DIR) as Exp:
         cfg = Exp.config.DATA_COLLECTION
         device = Exp.config.RUNTIME.DEVICE
         seed = int(Exp.config.RUNTIME.SEED)
@@ -75,10 +77,9 @@ if __name__ == "__main__":
         osc_fs = float(cfg.OSC_SAMPLE_RATES[0])
         subcarrier_spacing = float(cfg.SUBCARRIER_SPACING)
 
-        pwr_supply.set_6V(voltage=4, current=dc_offset_A)  # current-limited; never reaches 4 V
+        pwr_supply.set_25V(voltage=4, current=dc_offset_A)  # current-limited; never reaches 4 V
         pwr_supply.enable_output()
         Exp.log(f"DC offset set to {dc_offset_A - MEASURED_A_OFFSET:.3f} A")
-
         check_channel = CheckChannel(awg_driver=awg, osc_driver=osc, data_channel=3)
 
         mod_ofdm = ModulateDataOFDM(

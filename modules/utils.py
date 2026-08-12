@@ -49,6 +49,10 @@ class OFDMConfig:
         self.subcarrier_freqs_hz = self.subcarrier_freqs_hz.to(device)
         return self
 
+    @property
+    def baseband_sampling_rate(self) -> float:
+        return self.baseband_fft_length * self.subcarrier_spacing
+
 def symbols_to_time(X,
                     num_left_padding_zeros: int,
                     num_right_padding_zeros: int,
@@ -376,7 +380,8 @@ def load_runs_final_artifact(
             kernel_size=cfg["kernel_size"],
             hidden_channels=cfg["hidden_channels"],
             learn_noise=cfg.get("learn_noise", False),
-            gaussian=cfg.get("gaussian", True)
+            gaussian=cfg.get("gaussian", True),
+            activation=cfg["activation"]
         )
         model.load_state_dict(weights["channel_model"])
         return model.to(device), cfg
@@ -386,13 +391,15 @@ def load_runs_final_artifact(
             nlayers=cfg["nlayers"],
             dilation_base=cfg["dilation_base"],
             kernel_size=cfg["kernel_size"],
-            hidden_channels=cfg["hidden_channels"]
+            hidden_channels=cfg["hidden_channels"],
+            activation=cfg["activation"]
         )
         decoder = TCN(
             nlayers=cfg["nlayers"],
             dilation_base=cfg["dilation_base"],
             kernel_size=cfg["kernel_size"],
-            hidden_channels=cfg["hidden_channels"]
+            hidden_channels=cfg["hidden_channels"],
+            activation=cfg["activation"]
         )
         encoder.load_state_dict(weights["time_encoder"])
         decoder.load_state_dict(weights["time_decoder"])

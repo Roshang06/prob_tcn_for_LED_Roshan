@@ -16,3 +16,5 @@ data/*/old/*
 exp_state_cache_*
 data/experiments/*
 experiments/**/*.txt
+data/logs/*
+!data/logs/.gitkeep

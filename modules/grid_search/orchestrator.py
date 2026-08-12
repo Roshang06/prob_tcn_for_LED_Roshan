@@ -26,8 +26,12 @@ import json
 import math
 from pathlib import Path
 
+import json
+
+import numpy as np
 import torch
 import yaml
+from matplotlib.figure import Figure
 
 from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
@@ -53,6 +57,7 @@ class ChannelModelGridSearch(GridSearchBase):
 
         self.dataset_path = Path(dataset_path)
         self.val_fraction = float(grid_config.get("VAL_FRACTION", val_fraction or 0.0))
+        self.ofdm_config = None  # set in _prepare; needed for the frequency-resolved val plot
 
         points = expand_grid(grid_config["models"])
         # every CHANNEL_GRID_SEARCH key except orchestrator settings is a grid-wide
@@ -100,6 +105,7 @@ class ChannelModelGridSearch(GridSearchBase):
             sent, received = data
         else:
             sent, received, config = load_ofdm_dataset(str(self.dataset_path), self.device)
+            self.ofdm_config = config
             # channel model trains on the OFDM symbol only (CP + payload); drop the preamble
             preamble_length = sent.shape[1] - config.baseband_fft_length - config.cyclic_prefix_length
             sent, received = sent[:, preamble_length:], received[:, preamble_length:]
@@ -120,11 +126,6 @@ class ChannelModelGridSearch(GridSearchBase):
         if isinstance(y_pred, tuple):  # TCN learn_noise: (noisy, mean, std, nu)
             y_pred = y_pred[1]
         Y = Y.to(y_pred.device)
-        # keep rRMSE consistent with training: when warm-up is excluded from the loss,
-        # exclude it from the metric too
-        if getattr(adapter, "exclude_warmup", False):
-            s = adapter._warmup_slice(y_pred.shape[-1])
-            y_pred, Y = y_pred[..., s:], Y[..., s:]
         return {"per_burst_rrmse_pct": calculate_per_burst_rrmse_pct_loss(Y, y_pred)}
 
     # ----------------------------------------------------------------- run
@@ -142,6 +143,10 @@ class ChannelModelGridSearch(GridSearchBase):
             val_nll = adapter.val_nll(X_val, Y_val)
             if val_nll is not None:
                 metrics["val_nll"] = val_nll
+            # frequency-resolved validation error, aggregated into a final experiment plot
+            if self.ofdm_config is not None:
+                np.save(run_dir / "val_evm_vs_freq.npy",
+                        self._val_evm_per_carrier(adapter, X_val, Y_val))
         metrics["num_params"] = int(adapter.num_params())
 
         # receptive field (TCN uses model attribute; GMP uses max memory + 1)
@@ -160,6 +165,56 @@ class ChannelModelGridSearch(GridSearchBase):
         adapter.save(run_dir / "model.pt")
         self._write_history(run_dir, history)
         return metrics
+
+    def _val_evm_per_carrier(self, adapter, X_val, Y_val):
+        '''Per-active-carrier EVM% of the model's mean prediction against the real received
+        symbol on the held-out validation split, i.e. the frequency-resolved val error.'''
+        predicted = adapter.predict(X_val)
+        if isinstance(predicted, tuple):
+            predicted = predicted[1]
+        cyclic_prefix_length = self.ofdm_config.cyclic_prefix_length
+        active = self.ofdm_config.active_carrier_indices.cpu().numpy()
+
+        def carrier_symbols(symbol_block):
+            payload = symbol_block[:, cyclic_prefix_length:].detach().cpu().numpy()
+            return np.fft.fft(payload, norm="ortho", axis=1)[:, active]
+
+        real = carrier_symbols(Y_val)
+        modelled = carrier_symbols(predicted)
+        return np.sqrt((np.abs(modelled - real) ** 2).mean(0) / (np.abs(real) ** 2).mean(0)) * 100
+
+    def _plot_val_evm_vs_frequency(self, top_k=8):
+        '''Final experiment plot: per-carrier validation EVM% vs frequency for the best
+        channel models, overlaid. Saved once at the experiment root.'''
+        if self.ofdm_config is None or not self.runs_jsonl.exists():
+            return
+        rows = [json.loads(line) for line in self.runs_jsonl.read_text().splitlines() if line.strip()]
+        rows = [r for r in rows if r.get("val_per_burst_rrmse_pct") is not None]
+        if not rows:
+            return
+        rows.sort(key=lambda r: r["val_per_burst_rrmse_pct"])
+        freqs_mhz = self.ofdm_config.subcarrier_freqs_hz.cpu().numpy() / 1e6
+
+        fig = Figure(figsize=(7, 4.5))
+        ax = fig.subplots()
+        for row in rows[:top_k]:
+            evm_path = self.exp_dir / "runs" / row["run_id"] / "val_evm_vs_freq.npy"
+            if not evm_path.exists():
+                continue
+            ax.plot(freqs_mhz, np.load(evm_path), marker=".", ms=3, lw=1.0,
+                    label=f"{row['run_id']}  {row['val_per_burst_rrmse_pct']:.2f}%")
+        ax.set_xlabel("subcarrier frequency (MHz)")
+        ax.set_ylabel("validation EVM (%)")
+        ax.set_title("Channel-model validation EVM vs frequency (best models)")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=6, ncol=2)
+        fig.tight_layout()
+        fig.savefig(self.exp_dir / "val_evm_vs_frequency.png", dpi=150, bbox_inches="tight")
+
+    def run(self, **prepare_kwargs):
+        exp_dir = super().run(**prepare_kwargs)
+        self._plot_val_evm_vs_frequency()
+        return exp_dir
 
 
 def select_channel_models(exp_dir, mode="best", metric="val_per_burst_rrmse_pct",

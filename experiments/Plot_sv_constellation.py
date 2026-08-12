@@ -31,7 +31,7 @@ ed_gs = EncoderDecoderGridSearch(
             dataset_path="nothing",
 )
 
-ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "nonCausalPadding")
+ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation")
 
 #CHANNEL_PTH = f"prob_tcn_for_LED/data/experiments/test_real_gridsearch/channel_models_20260707_2205/runs/tcn_4712cb05"
 ED_MODEL_PTH = f"prob_tcn_for_LED/data/experiments/test_real_gridsearch/encoder_decoder_20260810_1212/runs/tcn_ae_9efa5918"
