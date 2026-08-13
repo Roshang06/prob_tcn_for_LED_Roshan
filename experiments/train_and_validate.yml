@@ -22,9 +22,9 @@ HARDWARE_RESOURCES:
         ID: HEWLETT-PACKARD,E3631A,0,2.1-5.0-1.0
 DATA_COLLECTION: 
   N: 10000 # Number of datapoints collected at the DC offset
-  DC_OFFSETS: [0.060] # A (single offset per dataset)
+  DC_OFFSETS: [0.080] # A (single offset per dataset)
   F_MINS: [1e6] # Hz
-  F_MAXS: [9.2e6] # Hz Here are the max freqs used in order of DC offset [7.6e6, 9.2e6, 10.8e6, 13e6]
+  F_MAXS: [10.8e6] # Hz Here are the max freqs used in order of DC offset [7.6e6, 9.2e6, 10.8e6, 13e6]
   OSC_SAMPLE_RATES: [500e6] # Hz
   SUBCARRIER_SPACING: 100e3 # Hz
   UPSAMPLE_FACTOR: 4
@@ -36,7 +36,7 @@ DATA_COLLECTION:
   POWER_MIN: 0.1  # minimum symbol power
   POWER_MAX: 1.5  # maximum symbol power
   JITTER_POWER: 0 # off-constellation complex noise on symbols (collection only); 0 disables
-  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/fair_ledge_dc0.06A_fmin1e+06_fmax9.2e+06_20260726_1115.zarr
+  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr
   CLIP_THRESHOLD: 3.0 # clip the AWG output to +/-this value (V)
 
 CHANNEL_GRID_SEARCH:
@@ -181,6 +181,7 @@ ENCODER_DECODER_VALIDATION:
 # Standalone follow-up (experiments/controlled_cdf.py), run after a finished
 # train_and_validate.
 CONTROLLED_CDF:
+  NON_PROB_CTRL_BASELINE: true
   ENABLED: true
   RUN_ANNEALING_SWEEP: false  # retrain the best E/D's architecture with a grid of annealing start values
   RUN_PENALTY_SWEEP: true
@@ -188,8 +189,9 @@ CONTROLLED_CDF:
   ANNEAL_STARTS: [0.25, .5, 1.0]  
   N: 10                          # validation trials per E/D
   EXCLUDE_MODELS: [gmp, lru]             # channel model types to skip (e.g. gmp is slow); [] keeps all
-  CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/dry_plain_channel_models_20260806_2059
-  DRIVE_MEAN_POWER_WEIGHTS: [1.0e-2, 1.0e-3, 1e-4]
+  NON_PROB_CTRL_BASELINE: true
+  CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/fleet_sand_channel_models_20260812_1903
+  DRIVE_MEAN_POWER_WEIGHTS: [1.0e-3, 1e-4, 1e-5]
   KURTOSIS_WEIGHTS: []
   NOISE_FLOOR_POINTS: 10  # replays of one fixed encoded symbol per E/D to estimate the
                           # additive noise floor; 0 disables the noise-floor plot

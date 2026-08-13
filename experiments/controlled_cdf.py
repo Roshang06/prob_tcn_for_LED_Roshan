@@ -88,40 +88,79 @@ PENALTY_FAMILIES = (
 )
 
 
-def build_penalty_swept_grid(seeds, anneal_starts, family_weights):
+def build_penalty_swept_grid(seeds, anneal_starts, family_weights, control_baseline=False):
     '''Seed x noise_anneal_start x one penalty at a time, plus a plain no-penalty reference.
-    family_weights maps each E/D penalty param to its weights.'''
+    family_weights maps each E/D penalty param to its weights.
+
+    control_baseline gives every penalty the sweep pins rather than sweeps a zero level too,
+    so the unregularized control has a grid cell to live in. Only control points are kept at
+    those zero levels, so the swept arm still sees the pinned value everywhere.'''
     grid_config = _fixed_ed_grid_config()
     params = grid_config["params"]
     params["seed"] = list(seeds)
     params["noise_anneal_start"] = list(anneal_starts)
     for param, weights in family_weights.items():
         params[param] = [BASELINE_PENALTY_WEIGHT] + list(weights)
+
+    if control_baseline:
+        for _, param, _ in PENALTY_FAMILIES:
+            if param in family_weights:
+                continue
+
+            pinned_weight = float(params[param])
+            if pinned_weight != BASELINE_PENALTY_WEIGHT:
+                params[param] = [pinned_weight, BASELINE_PENALTY_WEIGHT]
+
     return grid_config
 
 
-def keep_penalty_sweep_points(points, prob_channel_ids, penalty_params,
-                              combined_mean_power_weight=None):
-    '''Prob channels only, since annealing is inert on a deterministic channel. At most one
-    penalty is active per run, so the families stay separable.
+def is_swept_point(params, penalty_params, pinned_weights, combined_mean_power_weight=None):
+    '''A member of the swept arm: it sits at every pinned penalty weight and has at most one
+    penalty active, so the families stay separable.
 
-    combined_mean_power_weight additionally keeps kurtosis runs that carry that one mean-power weight. The
+    combined_mean_power_weight additionally admits kurtosis runs that carry that one mean-power weight. The
     kurtosis penalty is scale free, so on its own it leaves the drive amplitude to the data
     loss; pinning mean power fixes the amplitude and isolates drive shape as the only variable.'''
+    # a pinned penalty's zero level exists only so the control can turn it off
+    if any(float(params[name]) != weight for name, weight in pinned_weights.items()):
+        return False
+
+    active = [name for name in penalty_params if float(params.get(name, 0.0)) > 0]
+    combined = (combined_mean_power_weight is not None
+                and sorted(active) == ["drive_mean_power_weight", "kurtosis_weight"]
+                and float(params["drive_mean_power_weight"]) == combined_mean_power_weight)
+    return len(active) <= 1 or combined
+
+
+def is_control_point(params, penalty_params, pinned_weights):
+    '''The unregularized reference the swept arm is contrasted against: every penalty off,
+    swept and pinned alike, and no annealing.'''
+    every_penalty_off = all(float(params[name]) == 0
+                            for name in (*penalty_params, *pinned_weights))
+    return every_penalty_off and float(params["noise_anneal_start"]) == BASELINE_ANNEAL
+
+
+def keep_penalty_sweep_points(points, prob_channel_ids, penalty_params, pinned_weights,
+                              combined_mean_power_weight=None, control_baseline=False):
+    '''Split the expanded grid by channel form: probabilistic channels carry the swept arm,
+    deterministic channels carry only the unregularized control.
+
+    Annealing is inert on a deterministic channel, so the control point is the only thing worth
+    training there, and control_baseline is what turns that arm on at all.'''
     kept = []
     for point in points:
-        if point["channel_run_id"] not in prob_channel_ids:
-            continue
-
         params = point["params"]
-        active = [name for name in penalty_params if float(params.get(name, 0.0)) > 0]
-        combined = (combined_mean_power_weight is not None
-                    and sorted(active) == ["drive_mean_power_weight", "kurtosis_weight"]
-                    and float(params["drive_mean_power_weight"]) == combined_mean_power_weight)
-        if len(active) > 1 and not combined:
-            continue
+        on_prob_channel = point["channel_run_id"] in prob_channel_ids
 
-        kept.append(point)
+        if on_prob_channel:
+            keep = is_swept_point(params, penalty_params, pinned_weights,
+                                  combined_mean_power_weight)
+        else:
+            keep = control_baseline and is_control_point(params, penalty_params, pinned_weights)
+
+        if keep:
+            kept.append(point)
+
     return kept
 
 
@@ -389,14 +428,25 @@ if __name__ == "__main__":
                                  f"{[key for key, _, _ in PENALTY_FAMILIES]}")
             combined_mean_power_weight = getattr(test_cfg, "COMBINED_MEAN_POWER_WEIGHT", None)
             combined_mean_power_weight = float(combined_mean_power_weight) if combined_mean_power_weight else None
+
+            control_baseline = bool(test_cfg["NON_PROB_CTRL_BASELINE"])
+            fixed_params = _fixed_ed_grid_config()["params"]
+            pinned_penalty_weights = {param: float(fixed_params[param])
+                                      for _, param, _ in PENALTY_FAMILIES
+                                      if param not in families}
+
             Exp.log(f"penalty sweep anneal={anneal_starts} families={families}, against a "
                     f"plain no-penalty reference (one penalty at a time, prob channels only). "
                     f"kurtosis is also swept on top of mean power pinned at "
                     f"{combined_mean_power_weight}")
+            Exp.log(f"penalties pinned across the swept arm: {pinned_penalty_weights}; "
+                    f"unregularized deterministic control: {control_baseline}")
             penalty_ed_dir, penalty_val_dir = train_and_validate(
-                build_penalty_swept_grid(seeds, anneal_starts, families),
-                lambda points: keep_penalty_sweep_points(points, prob_channel_ids,
-                                                              families, combined_mean_power_weight),
+                build_penalty_swept_grid(seeds, anneal_starts, families, control_baseline),
+                lambda points: keep_penalty_sweep_points(points, prob_channel_ids, families,
+                                                              pinned_penalty_weights,
+                                                              combined_mean_power_weight,
+                                                              control_baseline),
                 "penalty")
 
             plot_penalty_sweep_figures(load_sweep_table(penalty_val_dir), parent_dir)

@@ -26,6 +26,7 @@ CONTROL_HATCH = "//"
 
 WEIGHT_DODGE_PERCENT = 3
 BOX_WIDTH = 3.0
+PLOT_CTRL_BASELINE = True
 
 # Tukey whiskers: the last point within 1.5 IQR of the quartiles, with anything beyond drawn
 # as a flier. Full range (0, 100) lets one bad seed set the y limits for every panel.
@@ -174,6 +175,15 @@ def draw_box(ax, x_pos, values, color, width=BOX_WIDTH, is_control=False):
     return box_plot
 
 
+def split_control_rows(table):
+    '''(swept prob-channel rows, deterministic-channel control rows). The control rows are
+    dropped when PLOT_CTRL_BASELINE is off, so a run that collected a baseline can still be
+    plotted without one.'''
+    sweep_rows = [row for row in table if row["is_prob"]]
+    control_rows = [row for row in table if not row["is_prob"]] if PLOT_CTRL_BASELINE else []
+    return sweep_rows, control_rows
+
+
 def plot_annealing_interaction(table, out_path, trace_field, trace_label, title,
                                include_zero_trace=True):
     '''Boxplot of validation EVM against noise anneal start, one trace per trace_field value,
@@ -181,8 +191,9 @@ def plot_annealing_interaction(table, out_path, trace_field, trace_label, title,
     def in_scope(row):
         return include_zero_trace or row[trace_field] > 0.0
 
-    prob_rows = [row for row in table if row["is_prob"] and in_scope(row)]
-    control_rows = [row for row in table if not row["is_prob"] and in_scope(row)]
+    sweep_rows, collected_control_rows = split_control_rows(table)
+    prob_rows = [row for row in sweep_rows if in_scope(row)]
+    control_rows = [row for row in collected_control_rows if in_scope(row)]
     trace_values = sorted({row[trace_field] for row in prob_rows})
     anneal_values = sorted({row["anneal_start"] for row in prob_rows})
 
@@ -284,8 +295,10 @@ SCATTER_METRICS = (
     ("drive_papr", "Encoder Drive PAPR", False),
 )
 
+DC_OFFSET = '60 mA'
+
 PENALTY_LABELS = (
-    ("drive_mean_power_weight", "drive mean power penalty"),
+    ("drive_mean_power_weight", f"Drive Mean Power at {DC_OFFSET}"),
     ("kurtosis_weight", "drive kurtosis penalty"),
 )
 
@@ -385,7 +398,11 @@ def plot_one_family(table, out_path, field, title, trace_label=None):
 def plot_penalty_sweep_figures(table, out_dir):
     '''Every figure the penalty sweep produces: one interaction plot per penalty family, the
     combined mean-power-plus-kurtosis plot, and the achieved-drive scatters.'''
-    families = penalty_sweep_families(table)
+    # the control turns off penalties the swept arm pins, so it would otherwise read as an
+    # extra swept family and filter the whole sweep out of its own figure
+    sweep_rows, control_rows = split_control_rows(table)
+
+    families = penalty_sweep_families(sweep_rows)
     if not families:
         raise ValueError("this run table varied no penalty weight, so there is nothing to sweep over")
 
@@ -394,26 +411,27 @@ def plot_penalty_sweep_figures(table, out_dir):
     for field, label in families.items():
         others = [other for other in families if other != field]
         plot_annealing_interaction(
-            [row for row in table if all(row[other] == 0.0 for other in others)],
+            [row for row in sweep_rows if all(row[other] == 0.0 for other in others)] + control_rows,
             Path(out_dir) / f"{field}_interaction.png",
             trace_field=field, trace_label=label,
-            title=f"Penalty sweep: {label}")
+            title=f"Penalty Sweep: {label}")
 
     # kurtosis on top of a pinned mean power, where amplitude is held fixed and drive shape is the only
     # thing varying across the traces
-    combined_mean_power_weight = pinned_combined_mean_power_weight(table)
+    combined_mean_power_weight = pinned_combined_mean_power_weight(sweep_rows)
     if combined_mean_power_weight is not None:
         plot_annealing_interaction(
-            [row for row in table
-             if row["drive_mean_power_weight"] == combined_mean_power_weight],
+            [row for row in sweep_rows
+             if row["drive_mean_power_weight"] == combined_mean_power_weight] + control_rows,
             Path(out_dir) / "combined_mean_power_kurtosis_interaction.png",
             trace_field="kurtosis_weight",
             trace_label=f"kurtosis weight at mean power {combined_mean_power_weight:g}",
             title=f"Kurtosis on top of drive mean power {combined_mean_power_weight:g}")
 
+    scatter_rows = sweep_rows + control_rows
     for field, label, log_x in SCATTER_METRICS:
-        if any(row.get(field) is not None for row in table):
-            plot_metric_vs_evm(table, Path(out_dir) / f"{field}_vs_evm.png",
+        if any(row.get(field) is not None for row in scatter_rows):
+            plot_metric_vs_evm(scatter_rows, Path(out_dir) / f"{field}_vs_evm.png",
                                field, label, log_x=log_x)
 
 
@@ -440,7 +458,7 @@ def main():
     if args.field:
         out_path = Path(args.out) if args.out else experiment_dir / f"{args.field}_interaction.png"
         plot_one_family(table, out_path, args.field,
-                        title=args.title or f"Penalty sweep: {args.field}",
+                        title=args.title or f"Penalty Sweep: {args.field}",
                         trace_label=args.trace_label)
         return
 
