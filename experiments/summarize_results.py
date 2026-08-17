@@ -45,35 +45,40 @@ RUN_CONFIGS = [
     {
         "label": "60 mA",
         "dc_ma": 60,
-        "channel_exp_dir": "data/experiments/train_and_validate/rich_arc_channel_models_20260805_1458",
-        "ed_exp_dir":      "data/experiments/train_and_validate/rich_arc_encoder_decoder_20260806_0021",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/rich_arc_ed_validation_20260806_0449",
-        "dataset_path":    "data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr",
+        "channel_exp_dir": "data/experiments/train_and_validate/tiny_cliff_channel_models_20260810_1622",
+        "ed_exp_dir":      "data/experiments/train_and_validate/tiny_cliff_encoder_decoder_20260811_0335",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/tiny_cliff_ed_validation_20260811_0457",
+        "dataset_path":    "data/sweeps/fair_ledge_dc0.06A_fmin1e+06_fmax9.2e+06_20260726_1115.zarr",
     },
     {
         "label": "80 mA",
         "dc_ma": 80,
-        "channel_exp_dir": "data/experiments/train_and_validate/rich_arc_channel_models_20260805_1458",
-        "ed_exp_dir":      "data/experiments/train_and_validate/rich_arc_encoder_decoder_20260806_0021",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/rich_arc_ed_validation_20260806_0449",
-        "dataset_path":    "data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr",
+        "channel_exp_dir": "data/experiments/train_and_validate/fleet_sand_channel_models_20260812_1903",
+        "ed_exp_dir":      "data/experiments/train_and_validate/calm_coast_encoder_decoder_20260815_1103", # change
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/calm_coast_ed_validation_20260815_1237", # change
+        "dataset_path":    "data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr",
     },
     {
-        "label": "120 mA",
+        "label": "120 mA mock",
         "dc_ma": 120,
-        "channel_exp_dir": "data/experiments/train_and_validate/rich_arc_channel_models_20260805_1458",
-        "ed_exp_dir":      "data/experiments/train_and_validate/rich_arc_encoder_decoder_20260806_0021",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/rich_arc_ed_validation_20260806_0449",
-        "dataset_path":    "data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr",
+        "channel_exp_dir": "data/experiments/train_and_validate/tiny_cliff_channel_models_20260810_1622", # change
+        "ed_exp_dir":      "data/experiments/train_and_validate/tiny_cliff_encoder_decoder_20260811_0335", # change
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/tiny_cliff_ed_validation_20260811_0457", # change
+        "dataset_path":    "data/sweeps/mild_star_dc0.12A_fmin1e+06_fmax1.3e+07_20260802_2119.zarr",
     },
-
 ]
 
 PLOT_PATH       = Path(__file__).resolve().parent.parent / "data/plots"
 DEVICE          = os.environ.get("SUMMARIZE_DEVICE", "cpu")
 N_POWER_BINS    = 10       # bins for plot 1
 MAX_QQ_SAMPLES  = 10_000  # downsample for Q-Q speed
-SHOW_RUN_IN_TITLE = True # Turn false for final manuscript plots
+SHOW_RUN_IN_TITLE = True  # append " (from <run_name>)" to every figure title
+# Figure-level titles, one per plot. Panels carry only their DC bias.
+PARETO_TITLE = "Median Pareto Front for 8 E/Ds per Channel Model"
+PRED_VS_ACTUAL_TITLE = "Predicted Vs. Actual EVM% across Pareto Sweep Runs"
+PACKET_TITLE = "Predicted Response of Best Gaussian TCN Channel Model"
+VAL_RRMSE_TITLE = "Validation RRMSE% Vs. Sent Power"
+VAL_RRMSE_VS_PARAMS_TITLE = "Channel Model Validation RRMSE% Vs. Parameter Count"
 
 _FONT = 7
 _SMALL = 5
@@ -364,10 +369,81 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
     plt.show()
 
 
-# PLOT 2: Pareto channel model params vs experimental EVM%
-# 2×2 subplot grid, one panel per DC bias
-# One trace per (model, distribution)
-# error bars = 2× SE (≈ 95% CI).
+# PLOT 1: channel-model accuracy vs size - validation per-burst RRMSE% vs parameter count.
+# 2x2 grid, one panel per DC bias, one trace per (model, distribution) using MODEL_STYLES,
+# mirroring the pareto EVM plot below. Only the channel models that were advanced to E/D
+# training (best per size) are shown, identified as the channels the paired ed_validation run
+# actually trained an E/D on.
+
+def plot_val_rrmse_vs_params(run_configs: list[dict]) -> None:
+    n = len(run_configs)
+
+    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh),
+                             sharex=True, sharey=True,
+                             constrained_layout=True)
+    axes_flat = axes.flatten()
+
+    for panel_index, cfg in enumerate(run_configs):
+        ax = axes_flat[panel_index]
+        runs = load_channel_runs(cfg["channel_exp_dir"])
+
+        validation_rows = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
+        trained_channel_ids = {row["channel_run_id"] for row in validation_rows}
+
+        traces: dict[tuple, list] = {}
+        for run in runs:
+            if run["run_id"] not in trained_channel_ids:
+                continue
+            key = (run["model"], run.get("distribution") or "none")
+            traces.setdefault(key, []).append((run["num_params"], run["val_per_burst_rrmse_pct"]))
+
+        for key in sorted(traces.keys(), key=_model_type_sort_key):
+            model, dist = key
+            style = _get_style(model, dist)
+            points = sorted(traces[key])
+            param_counts = np.array([params for params, _ in points], dtype=float)
+            rrmse_values = np.array([rrmse for _, rrmse in points])
+
+            ax.plot(param_counts, rrmse_values, color=style["color"], linestyle="-",
+                    linewidth=1.2, alpha=0.85, marker=style["marker"], markersize=3,
+                    label=_model_type_label(model, dist))
+
+        # channel sizes were chosen one per power-of-2 bucket, so a log axis spaces them evenly
+        ax.set_xscale("log")
+        ax.set_title(f"{cfg['dc_ma']} mA", fontsize=_FONT)
+        ax.grid(True, which="both")
+        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
+                fontsize=_FONT, va="top", ha="left")
+        ax.tick_params(labelbottom=True)
+        if panel_index % 2 == 0:
+            ax.set_ylabel("Val RRMSE (%)")
+
+        # x is shared, so only the bottom row of visible panels needs the label
+        if panel_index >= n - 2:
+            ax.set_xlabel("Channel Model Parameter Count")
+
+    fig.suptitle(VAL_RRMSE_VS_PARAMS_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
+
+    axes_flat[0].legend(fontsize=_SMALL, handlelength=2, markerscale=0.8,
+                        labelspacing=0.3, borderpad=0.4)
+
+    for ax in axes_flat[n:]:
+        ax.set_visible(False)
+
+    plt.savefig(PLOT_PATH / "val_rrmse_vs_params.svg", format="svg", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / "val_rrmse_vs_params.png", bbox_inches="tight")
+    plt.show()
+
+
+# PLOT 2: Pareto - channel model params vs experimental EVM%
+# 2×2 subplot grid, one panel per DC bias (mirrors plot 1).
+# One trace per (model, distribution) type using MODEL_STYLES.
+# Each channel model contributes one E/D per seed. Every seed is drawn as a faint dot and the
+# front tracks the median over them, so the spread is shown directly rather than summarized
+# into an interval.
+
+SEED_DOT_ALPHA = 0.2
+SEED_DOT_SIZE = 3
 
 def plot_pareto_evm(run_configs: list[dict]) -> None:
     n = len(run_configs)

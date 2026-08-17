@@ -295,7 +295,7 @@ SCATTER_METRICS = (
     ("drive_papr", "Encoder Drive PAPR", False),
 )
 
-DC_OFFSET = '60 mA'
+DC_OFFSET = '120 mA'
 
 PENALTY_LABELS = (
     ("drive_mean_power_weight", f"Drive Mean Power at {DC_OFFSET}"),
