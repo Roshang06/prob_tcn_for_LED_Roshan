@@ -225,6 +225,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         noise_anneal_start = float(p.get("noise_anneal_start", 1.0))
         anneal_start_epoch = int(round(noise_anneal_start * epochs))
         annealing_active = noise_anneal_start < 1.0
+        deterministic_channel = bool(p.get("deterministic_channel", False))
 
         # plain drive power
         drive_mean_power_weight = float(p.get("drive_mean_power_weight", 0.0))
@@ -251,7 +252,9 @@ class EncoderDecoderGridSearch(GridSearchBase):
         if use_drive_kurtosis:
             history["drive_kurtosis"] = []
         for epoch in range(epochs):
-            if epoch < anneal_start_epoch:
+            if deterministic_channel:
+                noise_scale = 0.0
+            elif epoch < anneal_start_epoch:
                 noise_scale = 1.0
             else:
                 noise_scale = 1.0 - (epoch - anneal_start_epoch) / max(epochs - 1 - anneal_start_epoch, 1)
