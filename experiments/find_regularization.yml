@@ -32,8 +32,8 @@ TEST_REGULARIZATION:
   EXCLUDE_MODELS: ['lru', 'gmp']
   SEEDS: 25 # seeds are 1 -> 25 inclusive
   VALIDATIONS_PER_SEED: 10
-  ANNEAL_STARTS: [0.25, 0.5, 1.0]
-  POWER_WEIGHTS: [1.0e-3, 1.0e-4]
+  ANNEAL_STARTS: [0.25, 0.50, 1.0]
+  POWER_WEIGHTS: [1.0e-2, 1.0e-3, 1.0e-4, 1.0e-5]
   KURTOSIS_WEIGHT: 0.1
   KURTOSIS_TARGET: 3.0
   CHANNEL_DIRS: # ordered by DC offset
@@ -45,7 +45,7 @@ TEST_REGULARIZATION:
 ENCODER_DECODER:
   CONSTELLATION: qpsk
   PREAMBLE_AMPLITUDE: 3.0
-  RUNS_PER_ARCH: 1
+  RUNS_PER_ARCH: 10
   params:
     nlayers: [2]
     dilation_base: [2]

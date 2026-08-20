@@ -1,5 +1,6 @@
 import json
 import random
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -15,10 +16,11 @@ from modules.grid_search import (EncoderDecoderGridSearch, EncoderDecoderValidat
                                  select_channel_models, select_encoder_decoders)
 from modules.grid_search.base import generate_run_name, run_id
 from modules.utils import OFDMConfig
-from plot_find_regularization import plot_delta_vs_anneal, write_summary_table
+from plot_find_regularization import (plot_delta_vs_anneal, plot_delta_pvalue_heatmap,
+                                       write_summary_table)
 
 HERE = Path(__file__).resolve().parent
-CONFIG_FILE = HERE / "find_regularization.yml"
+CONFIG_FILE = HERE / (sys.argv[1] if len(sys.argv) > 1 else "find_regularization.yml")
 EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
 LOG_DIR = HERE.parent / "data/logs"
 BOOTSTRAP_N = 10000
@@ -230,5 +232,7 @@ if __name__ == "__main__":
         Exp.log(f"saved stats -> {stats_path}")
 
         plot_delta_vs_anneal(stats_df, parent_dir / "delta_vs_anneal.png")
+        plot_delta_pvalue_heatmap(stats_df, parent_dir / "delta_pvalue_heatmap.png")
         write_summary_table(stats_df, parent_dir / "summary_table.csv")
         Exp.log(f"find_regularization complete: {parent_dir}")
+        Exp.log(f"replot: python {HERE / 'plot_find_regularization.py'} {stats_path}")

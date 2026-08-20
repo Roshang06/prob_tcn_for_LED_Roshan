@@ -2,12 +2,6 @@ RUNTIME:
   DEVICE: cuda
   SEED: 0
 
-# Set either path to reuse a previously trained experiment and skip that grid
-# search step entirely. Leave unset (or null) to run a fresh grid search.
-# CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/channel_models_YYYYMMDD_HHMM
-# ENCODER_DECODER_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/encoder_decoder_YYYYMMDD_HHMM
-
-
 CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/light_sea_channel_models_20260813_2059
 # ENCODER_DECODER_EXP_DIR:
 HARDWARE_RESOURCES:
@@ -36,7 +30,6 @@ DATA_COLLECTION:
   POWER_MIN: 0.1  # minimum symbol power
   POWER_MAX: 1.5  # maximum symbol power
   JITTER_POWER: 0 # off-constellation complex noise on symbols (collection only); 0 disables
-  # DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr 
   DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/mild_star_dc0.12A_fmin1e+06_fmax1.3e+07_20260802_2119.zarr
   CLIP_THRESHOLD: 3.0 # clip the AWG output to +/-this value (V)
 
@@ -175,23 +168,3 @@ ENCODER_DECODER_VALIDATION:
   CONSTELLATION: qpsk
   NOISE_FLOOR_POINTS: 20  # repeats of one fixed encoded symbol to estimate the additive
                            # noise floor per E/D; 0 disables the noise-floor plot
-
-
-# _____________________ Stand Alone Follow Up Experiments _____________________
-
-# Standalone follow-up (experiments/controlled_cdf.py), run after a finished
-# train_and_validate.
-CONTROLLED_CDF:
-  ENABLED: true
-  RUN_ANNEALING_SWEEP: false  # retrain the best E/D's architecture with a grid of annealing start values
-  RUN_PENALTY_SWEEP: true
-  SEEDS: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]   # one E/D per seed per channel form; controls the n
-  ANNEAL_STARTS: [0.25, .5, 1.0]  
-  N: 10                          # validation trials per E/D
-  EXCLUDE_MODELS: [gmp, lru]             # channel model types to skip (e.g. gmp is slow); [] keeps all
-  NON_PROB_CTRL_BASELINE: true
-  DRIVE_MEAN_POWER_WEIGHTS: [1.0e-2, 1.0e-3, 1.0e-4, 1.0e-5]
-  CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/light_sea_channel_models_20260813_2059 
-  NOISE_FLOOR_POINTS: 10  # replays of one fixed encoded symbol per E/D to estimate the
-                          # additive noise floor; 0 disables the noise-floor plot
-  KURTOSIS_WEIGHTS: []
