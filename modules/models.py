@@ -7,36 +7,27 @@ from torch.distributions.studentT import StudentT
 import matplotlib.pyplot as plt
 
 
-class ABC_time_model(nn.Module):
-    def __init__(self, theta=None):
-        super().__init__()
-        if theta is None:
-            self.theta = torch.nn.Parameter(torch.zeros(5))
-        else:
-            self.theta = theta
-        self.last_n_traj = None
+
+ACTIVATIONS = {
+    "relu": nn.ReLU,
+    "gelu": nn.GELU,
+    "silu": nn.SiLU,
+    "tanh": nn.Tanh,
+    "softplus": nn.Softplus,
+}
 
 
-    def forward(self, x, return_n=True):
-        # x: [B, T]
-        B, T = x.shape
-        device = x.device
-        dtype = x.dtype
-        n = torch.zeros(B, device=device, dtype=dtype)
-        n_traj = torch.empty(B, T, device=device, dtype=dtype) if return_n else None
-        outputs = torch.empty(B, T, device=device, dtype=dtype)
-        theta0, theta1, theta2, theta3, theta4 = self.theta[0], self.theta[1], self.theta[2], self.theta[3], self.theta[4]
-        for t in range(T):
-            nsq = n * n
-            n = (x[:, t] + theta0 * n + theta1 * nsq + theta2 * nsq * n)
-            n = torch.tanh(n) # This nonlinearity helps keep n stable
-            outputs[:, t] = theta3 * n + theta4 * nsq
-            assert not torch.isnan(n).any(), f"NaN detected at step {t}"
-            if return_n:
-                n_traj[:, t] = n
-        self.last_n_traj = n_traj.detach()
+def make_activation(name):
+    if name not in ACTIVATIONS:
+        raise ValueError(f"unknown activation {name!r}, expected one of {sorted(ACTIVATIONS)}")
+    return ACTIVATIONS[name]()
 
-        return outputs
+
+def maybe_weight_norm(conv, enabled):
+    '''Reparameterize a conv's weight as magnitude x direction (Salimans & Kingma 2016)
+    when enabled. Normalizes the weights'''
+    return torch.nn.utils.parametrizations.weight_norm(conv) if enabled else conv
+
 
 ACTIVATIONS = {
     "relu": nn.ReLU,
@@ -222,10 +213,8 @@ class TCN_channel(nn.Module):
 
 
     def sample_student_t_pytorch(self, mean, std, nu):
-        """
-        Samples from a Student's t-distribution using PyTorch's built-in implementation.
-        Uses rsample() to maintain gradients for 'std' and 'nu'.
-        """
+        '''Sample a Student-t via PyTorch's built-in dist; rsample() keeps
+        gradients flowing through std and nu.'''
         nu = torch.clamp(nu, min=2.001)
         std = torch.clamp(std, min=1e-6)
         dist = StudentT(df=nu, loc=mean, scale=std)
@@ -233,9 +222,8 @@ class TCN_channel(nn.Module):
 
 
     def sample_student_t_mps(self, mean, std, nu):
-        '''
-        Wilson-Hilferty Approximation for chi^2 converted to scaled and shifted student t
-        '''
+        '''Wilson-Hilferty chi^2 approximation for a scaled/shifted Student-t
+        (StudentT.rsample is unsupported on MPS).'''
         z = torch.randn_like(mean)
         z_chi = torch.randn_like(mean)
         chi2_approx = nu * (1 - 2/(9*nu) + z_chi * torch.sqrt(2/(9*nu))).pow(3)
@@ -280,30 +268,24 @@ class TCN_channel(nn.Module):
 
 
 def _complex_diag_scan(a_re, a_im, b_re, b_im):
-    '''Inclusive parallel prefix scan of the diagonal linear recurrence
-        x_k = a_k * x_{k-1} + b_k          (all complex, elementwise / diagonal)
-    for every batch and state channel at once, using the Hillis-Steele doubling
-    scheme (O(T log T), fully differentiable, no Python loop over time).
+    '''Parallel prefix scan of the diagonal recurrence x_k = a_k x_{k-1} + b_k
+    (complex, elementwise) via Hillis-Steele doubling: O(T log T), no time loop.
 
-    a_*, b_* have shape [*, T, N] (a may broadcast on the batch dim). The monoid
-    combine is the same associative operator as the reference LRU parallel scan:
-    composing (a_i, b_i) then (a_j, b_j) gives (a_j a_i, a_j b_i + b_j). Returns the
-    scanned additive component (b), i.e. the state sequence x_k, as (re, im).
-
-    Complex numbers are carried as separate real/imag tensors so the whole thing
-    runs on MPS, which lacks solid native complex support (cf. the Student-t path).
+    a, b have shape [*, T, N]. The scan composes (a_i, b_i) then (a_j, b_j) as
+    (a_j a_i, a_j b_i + b_j) and returns the state sequence x_k as (re, im).
+    Real and imaginary parts are kept separate for MPS, which lacks native
+    complex support.
     '''
     T = a_re.shape[-2]
     d = 1
     while d < T:
-        # shift right by d along time; the missing left neighbour is the monoid
-        # identity (multiplier 1, addend 0), so pad a with 1 and b with 0.
+        # shift by d and pad with the identity element (a=1, b=0)
         pa_re = F.pad(a_re, (0, 0, d, 0), value=1.0)[..., :T, :]
         pa_im = F.pad(a_im, (0, 0, d, 0), value=0.0)[..., :T, :]
         pb_re = F.pad(b_re, (0, 0, d, 0), value=0.0)[..., :T, :]
         pb_im = F.pad(b_im, (0, 0, d, 0), value=0.0)[..., :T, :]
 
-        # new_a = a * pa ; new_b = a * pb + b   (complex mult, current=right operand)
+        # compose: new_a = a·pa, new_b = a·pb + b
         new_a_re = a_re * pa_re - a_im * pa_im
         new_a_im = a_re * pa_im + a_im * pa_re
         new_b_re = a_re * pb_re - a_im * pb_im + b_re
@@ -318,8 +300,6 @@ class LRU(nn.Module):
     '''Linear Recurrent Unit layer (Orvieto et al., 2023). A linear diagonal
     complex-state recurrence run with a parallel scan, plus a skip-connected
     output projection.
-
-    The complex arithmetic is kept as explicit real/imag pairs for MPS support.
 
     N = state_dim (recurrent state size), H = model_dim (in/out feature size).
     Input/output are real sequences of shape [B, T, H].
@@ -340,7 +320,7 @@ class LRU(nn.Module):
         self.nu_log = nn.Parameter(nu_log)
         self.theta_log = nn.Parameter(theta_log)
 
-        # Glorot-initialised input/output projections (real + imag parts).
+        # Glorot-initialized input/output projections (real + imag parts).
         self.B_re = nn.Parameter(torch.randn(N, H) / math.sqrt(2 * H))
         self.B_im = nn.Parameter(torch.randn(N, H) / math.sqrt(2 * H))
         self.C_re = nn.Parameter(torch.randn(H, N) / math.sqrt(N))
@@ -372,7 +352,6 @@ class LRU(nn.Module):
         Bu_re = u @ Bn_re.t()
         Bu_im = u @ Bn_im.t()
 
-        # Lambda is time-invariant: broadcast it across time (batch dim stays 1).
         a_re = lam_re.view(1, 1, N).expand(1, T, N)
         a_im = lam_im.view(1, 1, N).expand(1, T, N)
         x_re, x_im = _complex_diag_scan(a_re, a_im, Bu_re, Bu_im)  # states x_k
@@ -384,7 +363,7 @@ class LRU(nn.Module):
 
 
 class LRUBlock(nn.Module):
-    '''One residual LRU block: pre-norm -> LRU -> GELU -> GLU, as in the paper.'''
+    '''One residual LRU block: pre-norm => LRU => GELU => GLU'''
     def __init__(self, state_dim, model_dim, dropout=0.0,
                  r_min=0.0, r_max=1.0, max_phase=6.28):
         super().__init__()
@@ -404,14 +383,7 @@ class LRUBlock(nn.Module):
 
 
 class LRU_channel(nn.Module):
-    '''Stacked Linear Recurrent Unit channel model, a modern deep state-space /
-    linear-RNN baseline to sit alongside TCN_channel and the memory polynomials.
-
-    Mirrors TCN_channel's I/O contract so it drops into the same grid-search
-    adapter: input [B, T], and either returns a centred deterministic estimate
-    `mean_out` (learn_noise=False) or the probabilistic tuple
-    (noisy_out, mean_out, std_out, nu_out) with a Gaussian (gaussian=True) or
-    Student-t (gaussian=False) observation model (learn_noise=True).
+    '''Stacked Linear Recurrent Unit channel model
     '''
     def __init__(self, state_dim=64, hidden_dim=64, n_layers=2, dropout=0.0,
                  r_min=0.0, r_max=1.0, max_phase=6.28,
@@ -539,8 +511,7 @@ class memory_polynomial_channel(nn.Module):
 
     def _create_regressors(self, X):
         B, T = X.shape
-        # Each example and target will get a matrix and column vector. All will be stacked
-        # to form a A with shape [NxT, memory_linear + memory_nonlinearxnonlinear_order] regressor matrix
+        # Build the regressor matrix A of shape [B*T, num_regressors].
         batched_regressor_cols = []
         num_regressors = (
             (self.memory_linear + 1) +
@@ -614,8 +585,8 @@ class memory_polynomial_channel(nn.Module):
             c += A_blk.T @ y_blk
             total_variance += (y_blk * y_blk).sum()
             del A_blk, y_blk
-        # Gram = R^T R via Cholesky decomposition; then g = Q^T b = R^{-T} (A^T b) = R^{-T} c => R^{T} g = c
-        # which is a simple triangular system to solve for g, which gives us the variance contribution of each regressor. Then we can calculate ERR as (g_i^2 / total_variance) * 100
+        # Cholesky G = R^T R, then solve R^T g = c for g = Q^T b. Each g_i^2 is a
+        # regressor's variance contribution; ERR_i = g_i^2 / total_variance * 100.
         R = torch.linalg.cholesky(G, upper=True)
         g = torch.linalg.solve_triangular(R.T, c.unsqueeze(-1), upper=False).squeeze(-1)
         component_variances = g ** 2
@@ -702,6 +673,7 @@ class GeneralizedMemoryPolynomial(memory_polynomial_channel):
 
     def _create_regressors(self, X):
         B, T = X.shape
+        # Build the regressor matrix A of shape [B*T, num_regressors].
 
         X_powers = {k: torch.pow(X, k) for k in range(1, self.nonlinearity_order + 1)}
         batched_regressor_cols = []

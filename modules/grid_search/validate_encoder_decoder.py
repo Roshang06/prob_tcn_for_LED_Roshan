@@ -328,8 +328,7 @@ class EncoderDecoderValidation(GridSearchBase):
         def evm_percent(sent_list, recovered_list):
             sent = np.concatenate([np.asarray(s) for s in sent_list])
             recovered = np.concatenate([np.asarray(r) for r in recovered_list])
-            return float(np.sqrt(np.mean(np.abs(sent - recovered) ** 2)
-                                 / (np.mean(np.abs(sent) ** 2) + 1e-12)) * 100)
+            return float(evm_pct(sent, recovered))
 
         fig = Figure(figsize=(14, 7.5))
         axes = fig.subplots(2, 4)

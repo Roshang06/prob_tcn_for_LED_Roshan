@@ -1,0 +1,64 @@
+RUNTIME:
+  DEVICE: cuda
+  SEED: 0
+
+HARDWARE_RESOURCES:
+    Agilent_33250A:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: Agilent Technologies,33250A,0,1.03-1.01-1.00-03-1
+    Tektronix_TDS2000:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: TEKTRONIX,TBS2074,C020561,CF:91.1CT FV:v1.26.0; FPGA:v1.21;
+    HP_EE3631A:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: HEWLETT-PACKARD,E3631A,0,2.1-5.0-1.0
+
+TEST_REGULARIZATION:
+  DC_OFFSETS: [0.05, 0.06, 0.08, 0.120] # A, one per offset, ordered
+  F_MINS: [1e6] # Hz
+  F_MAXS: [7.6e6, 9.2e6, 10.8e6, 13e6] # Hz, ordered by DC offset
+  OSC_SAMPLE_RATES: [500e6] # Hz
+  SUBCARRIER_SPACING: 100e3 # Hz
+  UPSAMPLE_FACTOR: 4
+  AWG_TABLE_FRACTION: 0.125
+  CP_LENGTH_FRACTION: 0.25
+  PREAMBLE_LENGTH: 256
+  MODULATION_FORMAT: "m7_apsk_constellation"
+  OSC_SCALE: 0.5 # V/div
+  CLIP_THRESHOLD: 3.0
+  POWER_MIN: 0.1
+  POWER_MAX: 1.5
+  JITTER_POWER: 0
+  EXCLUDE_MODELS: ['lru', 'gmp']
+  SEEDS: 25 # seeds are 1 -> 25 inclusive
+  VALIDATIONS_PER_SEED: 10
+  ANNEAL_STARTS: [0.25, 0.50, 1.0]
+  POWER_WEIGHTS: [1.0e-2, 1.0e-3, 1.0e-4, 1.0e-5]
+  KURTOSIS_WEIGHT: 0.1
+  KURTOSIS_TARGET: 3.0
+  CHANNEL_DIRS: # ordered by DC offset
+    - raw_storm_channel_models_20260808_1526
+    - tiny_cliff_channel_models_20260810_1622
+    - fleet_sand_channel_models_20260812_1903
+    - light_sea_channel_models_20260813_2059
+
+ENCODER_DECODER:
+  CONSTELLATION: qpsk
+  PREAMBLE_AMPLITUDE: 3.0
+  RUNS_PER_ARCH: 10
+  params:
+    nlayers: [2]
+    dilation_base: [2]
+    kernel_size: [16]
+    hidden_channels: [16]
+    activation: [relu]
+    epochs: 1500
+    lr: 1.0e-3
+    weight_decay: [1e-5]
+    batch_size: 64
+    factor: 0.5
+    patience: 25
+    min_lr: 1.0e-6
+
+ENCODER_DECODER_VALIDATION:
+  CONSTELLATION: qpsk

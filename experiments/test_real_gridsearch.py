@@ -106,7 +106,7 @@ ENCODER_DECODER_GRID = {
         "weight_decay":    1e-5,
         "batch_size":      8,
         "activation":       "relu",
-        "quantization":     [None, 8, 7, 6, 5, 4, 3, 2, 1]
+        "quantization":     [None, 4]
     },
 }
 

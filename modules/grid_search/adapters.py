@@ -2,7 +2,7 @@
 Model adapters + registry for the channel-model grid search.
 
 Each adapter wraps one model family from modules.models behind a single
-interface so the orchestrator never needs to know how a given model trains
+interface so the grid search never needs to know how a given model trains
 (TCN = iterative SGD, GMP = closed-form least squares).
 '''
 from pathlib import Path
@@ -272,7 +272,7 @@ class GMPAdapter:
 
     def fit(self, X, Y, X_val=None, Y_val=None) -> dict:
         self.model.fit(X, Y, **self.fit_params)
-        return {}  # closed-form: no per-epoch history (val loss measured by orchestrator)
+        return {}  # closed-form: no per-epoch history (val loss measured by the grid search)
 
     def val_nll(self, X, Y):
         return None  # deterministic least-squares fit, no likelihood
@@ -286,46 +286,8 @@ class GMPAdapter:
     def save(self, path: Path) -> None:
         torch.save({"weights": self.model.weights, "fit_params": self.fit_params}, path)
 
-
-class MockAdapter:
-    '''Smoke-test adapter: no real model, lets you exercise the orchestrator
-    (folders, runs.jsonl, resume) without touching torch or data. Remove later.'''
-    name = "mock"
-
-    def __init__(self, params: dict, shared: dict = None):
-        self.params = params
-        self.shared = shared or {}
-
-    @classmethod
-    def from_config(cls, params: dict, device: str, shared: dict = None) -> "MockAdapter":
-        return cls(params, shared=shared)
-
-    @classmethod
-    def load(cls, params: dict, checkpoint: Path, device: str, shared: dict = None) -> "MockAdapter":
-        return cls(params, shared=shared)
-
-    def fit(self, X, Y, X_val=None, Y_val=None) -> dict:
-        history = {"loss": [1.0, 0.5, 0.25]}
-        if X_val is not None:
-            history["val_loss"] = [1.1, 0.6, 0.35]
-        return history
-
-    def val_nll(self, X, Y):
-        return None
-
-    def predict(self, X):
-        return X
-
-    def num_params(self) -> int:
-        return int(self.params["n"])
-
-    def save(self, path: Path) -> None:
-        Path(path).write_bytes(b"mock-checkpoint")
-
-
 MODEL_REGISTRY = {
     TCNAdapter.name: TCNAdapter,
     LRUAdapter.name: LRUAdapter,
     GMPAdapter.name: GMPAdapter,
-    MockAdapter.name: MockAdapter,
 }

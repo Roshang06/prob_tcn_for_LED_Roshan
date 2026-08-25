@@ -1,15 +1,12 @@
 '''
-Full single-DC-offset pipeline on the real hardware.
+This is the primary experiment for:
 
-  1. gather OFDM data into a zarr dataset (or toggle to reuse an existing one)
-  2. channel-model grid search on that dataset
-  3. select channel models (best-per-family, or pin run_ids)
-  4. encoder/decoder grid search against the chosen channel models
-  5. select encoder/decoders (all, or pin run_ids) and validate them on the live
-     channel, then summarise BER/EVM for the DC offset.
+1. Gathering data at a chosen DC offset
+2. Training channel models
+3. Training encoders/decoders (E/Ds) on chosen channel models 
+4. Validating trained E/Ds in experiment 
 
-Combines end_to_end_experiment.py (real data collection) with the grid-search /
-validation flow exercised synthetically in test_gridsearch.py.
+The exact behavior of this experiment is set by modifyign the parameters in the train_and_validate.yml file
 '''
 import csv
 import random
@@ -35,18 +32,18 @@ CONFIG_FILE = HERE / "train_and_validate.yml"
 EXP_DIR = HERE.parent / "data/experiments/train_and_validate"
 LOG_DIR = HERE.parent / "data/logs"
 
-SELECTED_CHANNEL_RUN_IDS = None  # None -> best per family; or ["tcn_xxxx", ...]
-SELECTED_ED_RUN_IDS = None       # None -> all E/D runs; or ["tcn_ae_xxxx", ...]
-VALIDATION_TRIALS = 20
+SELECTED_CHANNEL_RUN_IDS = None  # If none, pick automatiicaly 
+SELECTED_ED_RUN_IDS = None  
+
+VALIDATION_TRIALS = 40           # The number of validation trials for each E/D in experiment to get a better estimate of the performance over many OFDM symbols
 MAX_SYNC_RETRIES = 3             # re-collect a capture this many times if sync_outlier is flagged
-
-MEASURED_A_OFFSET = 0.000
-
 
 if __name__ == "__main__":
     RUN_NAME = generate_run_name()
 
-    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE, create_log_file=True, run_name=RUN_NAME,
+    with ExperimentalContext(CONFIG_FILE=CONFIG_FILE,
+                             create_log_file=True,
+                             run_name=RUN_NAME,
                              log_dir=LOG_DIR) as Exp:
         cfg = Exp.config.DATA_COLLECTION
         device = Exp.config.RUNTIME.DEVICE
@@ -69,7 +66,7 @@ if __name__ == "__main__":
         osc.set_coupling(ch=1, coupling="AC")
         osc.set_coupling(ch=3, coupling="AC")
 
-        # single DC offset per dataset (see AppendToDataset)
+        # single DC offset per dataset
         dc_offset_A = float(cfg.DC_OFFSETS[0])
         assert dc_offset_A < 0.4, f"DC offset {dc_offset_A} A exceeds safe range for the LED driver"
         min_freq = float(cfg.F_MINS[0])
@@ -79,7 +76,7 @@ if __name__ == "__main__":
 
         pwr_supply.set_25V(voltage=4, current=dc_offset_A)  # current-limited; never reaches 4 V
         pwr_supply.enable_output()
-        Exp.log(f"DC offset set to {dc_offset_A - MEASURED_A_OFFSET:.3f} A")
+        Exp.log(f"DC offset set to {dc_offset_A:.3f} A")
         check_channel = CheckChannel(awg_driver=awg, osc_driver=osc, data_channel=3)
 
         mod_ofdm = ModulateDataOFDM(
@@ -190,12 +187,16 @@ if __name__ == "__main__":
                 dataset_path=dataset_path, run_prefix=RUN_NAME)
             channel_exp_dir = channel_gs.run()
 
-        # 3. select channel models: SELECTION_MODE picks "all" (size sweep),
-        # "best" (one winner per channel form) or "best_per_size"; PROB_SELECTION_KEY
-        # sets the ranking metric for probabilistic runs (both from the config)
+        # 3. select channel models: 
+        # SELECTION_MODE settings: 
+        # "all" 
+        # "best" (one winner per channel form)
+        # "best_per_size" (best per int(log_2(param_count)) bin)
+
         channel_gs_config = Exp.config.CHANNEL_GRID_SEARCH
         selection_mode = getattr(channel_gs_config, "SELECTION_MODE")
         prob_selection_key = getattr(channel_gs_config, "PROB_SELECTION_KEY")
+
         best_channels = select_channel_models(
             channel_exp_dir, mode=selection_mode, prob_metric=prob_selection_key,
             run_ids=SELECTED_CHANNEL_RUN_IDS)
@@ -216,9 +217,9 @@ if __name__ == "__main__":
             ed_exp_dir = ed_gs.run(ofdm_config=OFDMConfig.from_modulator(mod_ofdm))
 
         # 5. select E/D models and validate on the live channel. Validation order is
-        # shuffled (seeded) so slow channel drift over a multi-hour sweep does not
-        # correlate with grid order (e.g. model size); resume stays safe because
-        # finished runs are skipped by run_id.
+        # shuffled so slow channel drift over a multi-hour sweep does not
+        # correlate with grid order
+
         ed_models = select_encoder_decoders(
             ed_exp_dir, channel_exp_dir=channel_exp_dir, run_ids=SELECTED_ED_RUN_IDS)
         random.Random(seed).shuffle(ed_models)
@@ -228,9 +229,7 @@ if __name__ == "__main__":
         check_channel.run("pre-validation")
         _restore_ofdm_scope()
 
-        # Validation transmits clean symbols with its own constellation (independent of the
-        # data-collection constellation), so build a dedicated mod/demod: no power sweep or
-        # jitter, natural symbol power matching E/D training.
+        # Validation transmits clean symbols with its own constellation
         val_constellation = get_constellation(Exp.config.ENCODER_DECODER_VALIDATION.CONSTELLATION)
         mod_ofdm_val = ModulateDataOFDM(
             constellation=val_constellation,
@@ -265,19 +264,26 @@ if __name__ == "__main__":
         val_exp_dir = validation.run()
         check_channel.run("post-validation")
 
+
+
+        # Final printout of results
         print("\n" + "=" * 60)
-        print(f"Results summary: DC offset {dc_offset_A - MEASURED_A_OFFSET:.3f} A")
+        print(f"Results summary: DC offset {dc_offset_A:.3f} A")
         print("=" * 60)
-        for label, summary_dir in [("channel", channel_exp_dir),
-                                   ("encoder/decoder", ed_exp_dir),
-                                   ("validation", val_exp_dir)]:
+        for label, summary_dir in [("channel", channel_exp_dir), ("encoder/decoder", ed_exp_dir), ("validation", val_exp_dir)]:
+            
             lb = Path(summary_dir) / "summary" / "leaderboard.csv"
             rows = list(csv.DictReader(open(lb)))
-            metric = next((m for m in ("evm_pct", "evm", "per_burst_rrmse_pct", "rrmse_pct")
-                           if rows and m in rows[0]), "per_burst_rrmse_pct")
+            metric = next((m for m in ("evm_pct", "evm", "per_burst_rrmse_pct", "rrmse_pct") if rows and m in rows[0]), "per_burst_rrmse_pct")
+            
             print(f"\n  {label} leaderboard (sorted by {metric}):")
             for row in sorted(rows, key=lambda r: float(r[metric])):
+
                 extra = f"  ber={float(row['ber']):.4f}" if row.get("ber") else ""
                 dist = row.get("distribution") or row.get("channel_distribution") or row.get("channel_form") or "?"
+                clip = ""
+
+                if row.get("clip_penalty_weight") not in (None, ""):
+                    clip = f"  clip_w={float(row['clip_penalty_weight']):g} rho={float(row['clip_penalty_rho']):g}"
                 print(f"    {row['run_id']}  {metric}={float(row[metric]):.6f}{extra}  "
                       f"dist={dist}  params={row['num_params']}  t={row['train_seconds']}s")

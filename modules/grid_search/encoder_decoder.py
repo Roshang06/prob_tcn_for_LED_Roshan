@@ -1,6 +1,6 @@
 '''
 EncoderDecoderGridSearch: trains TCN encoder/decoder pairs end-to-end against a set
-of frozen, already-trained channel models (see orchestrator.select_channel_models)
+of frozen, already-trained channel models (see channel_model.select_channel_models)
 and writes a resumable run folder in the same layout as ChannelModelGridSearch.
 
 Each encoder/decoder grid point is paired with every supplied channel model, so
@@ -22,7 +22,7 @@ from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
 from modules.models import TCN
 from modules.utils import (calculate_BER, calculate_per_burst_rrmse_pct_loss, evm_pct, in_band_time_loss,
-                           load_ofdm_dataset, symbols_to_time, correlation)
+                           load_ofdm_dataset, symbols_to_time)
 
 ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation", "quantization")
 
@@ -75,7 +75,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         '''
         Build the E/D grid from the ENCODER_DECODER section of the config,
         paired against an already-selected list of channel_models (see
-        orchestrator.select_channel_models).
+        channel_model.select_channel_models).
 
         dataset_path overrides DATA_COLLECTION.DATASET_PATH from the config file;
         use this when the dataset was just created and the YAML still shows null.
@@ -229,6 +229,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         noise_anneal_start = float(p.get("noise_anneal_start", 1.0))
         anneal_start_epoch = int(round(noise_anneal_start * epochs))
         annealing_active = noise_anneal_start < 1.0
+        deterministic_channel = bool(p.get("deterministic_channel", False))
 
         # plain drive power
         drive_mean_power_weight = float(p.get("drive_mean_power_weight", 0.0))
@@ -255,7 +256,9 @@ class EncoderDecoderGridSearch(GridSearchBase):
         if use_drive_kurtosis:
             history["drive_kurtosis"] = []
         for epoch in range(epochs):
-            if epoch < anneal_start_epoch:
+            if deterministic_channel:
+                noise_scale = 0.0
+            elif epoch < anneal_start_epoch:
                 noise_scale = 1.0
             else:
                 noise_scale = 1.0 - (epoch - anneal_start_epoch) / max(epochs - 1 - anneal_start_epoch, 1)
@@ -324,7 +327,6 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz,
                                  channel_id=point["channel_run_id"], channel_type=ch_model_type, evm=evm)
         self._plot_constellation(run_dir, sent_freq, self._frame_to_freq(encoder(eval_sent_time), ofdm_config=ofdm_config), ofdm_config.subcarrier_freqs_hz, rec_title="encoded")
-        self._plot_delay_correlation(run_dir, eval_sent_time, decoded_time_eval)
         self._plot_position_error(run_dir, eval_sent_time[:, self.preamble_length:], decoded_time_eval[:, self.preamble_length:], ofdm_config.cyclic_prefix_length)
         return metrics
 
@@ -451,31 +453,6 @@ class EncoderDecoderGridSearch(GridSearchBase):
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S").replace(" ", "").replace(":", "-")
         fig.savefig(run_dir / "plots" / f"constellation_{current_time}.png", dpi=120)
-
-    def _plot_delay_correlation(self, run_dir, sent_time, decoded_time, lag_max=40):
-        '''Cross-correlation between sent and decoded time signals. A causal
-        encoder/decoder/channel chain will show its peak at a positive lag,
-        not lag 0 — that offset is the group delay in_band_time_loss never
-        corrects for.'''
-        with torch.no_grad():
-            corr = correlation(sent_time, decoded_time, lag_max).squeeze(-1).cpu().numpy()
-        lags = np.arange(-lag_max, lag_max + 1)
-        peak_lag = int(lags[np.argmax(np.abs(corr))])
-
-        fig = Figure(figsize=(7, 4))
-        ax = fig.subplots()
-        ax.plot(lags, corr, marker=".", ms=3)
-        ax.axvline(0, color="gray", lw=1, ls="--")
-        ax.axvline(peak_lag, color="r", lw=1, ls="--", label=f"peak lag={peak_lag}")
-        ax.set_xlabel("lag (samples)")
-        ax.set_ylabel("normalized correlation")
-        ax.set_title(f"{run_dir.name} — sent/decoded cross-correlation")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
-        fig.savefig(run_dir / "plots" / "delay_correlation.png", dpi=120)
-        return peak_lag
 
     def _plot_position_error(self, run_dir, sent_time, decoded_time, cp_len):
         '''Per-timestep squared error, aligned to the CP boundary. If error is
