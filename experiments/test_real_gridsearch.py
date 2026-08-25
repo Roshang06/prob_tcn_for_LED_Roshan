@@ -89,16 +89,6 @@ CHANNEL_GRID = {
                 "activation":       "relu",
             },
         },
-        {
-            "model": "gmp",
-            "params": {
-                "memory_linear":       [10],
-                "memory_nonlinear":    10,
-                "nonlinearity_order":  3,
-                "cross_term_depth":    [0, 1],
-                "ridge":               1e-3,
-            },
-        },
     ]
 }
 
@@ -107,15 +97,16 @@ ENCODER_DECODER_GRID = {
     "preamble_amplitude": 3.0,
     "Mix-Match_Archs": False,
     "params": {
-        "nlayers":         [2, 3],
+        "nlayers":         [3],
         "dilation_base":   2,
         "kernel_size":     5,
-        "hidden_channels": [4, 8],
+        "hidden_channels": [8],
         "epochs":          1000,
         "lr":              1e-3,
         "weight_decay":    1e-5,
         "batch_size":      8,
         "activation":       "relu",
+        "quantization":     [None, 8, 7, 6, 5, 4, 3, 2, 1]
     },
 }
 

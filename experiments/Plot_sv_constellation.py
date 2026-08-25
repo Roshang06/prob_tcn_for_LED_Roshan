@@ -16,14 +16,8 @@ from test_real_gridsearch import (
     OFDM_CONFIG, ENCODER_DECODER_GRID
 )
 from generate_Q88_time_frames import WAVEFORMS, read_dataset, READ_PATH, create_sent_time
-from Execute_channel import send_through_channel
+from Execute_channel import send_through_channel, q88_hex_to_float
 from modules.experimental_blocks import band_limited_zc_preamble
-
-def q88_hex_to_float(hexa: str):
-    v = int(hexa, 16)
-    if v & 0x8000:  # If the sign bit is set (negative)
-        v -= 0x10000
-    return v/256
 
 ed_gs = EncoderDecoderGridSearch(
             ENCODER_DECODER_GRID,
@@ -31,10 +25,10 @@ ed_gs = EncoderDecoderGridSearch(
             dataset_path="nothing",
 )
 
-ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation")
+ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation", "quantization")
 
 #CHANNEL_PTH = f"prob_tcn_for_LED/data/experiments/test_real_gridsearch/channel_models_20260707_2205/runs/tcn_4712cb05"
-ED_MODEL_PTH = f"prob_tcn_for_LED/data/experiments/test_real_gridsearch/encoder_decoder_20260810_1212/runs/tcn_ae_9efa5918"
+ED_MODEL_PTH = "prob_tcn_for_LED/data/experiments/test_real_gridsearch/encoder_decoder_20260824_1457/runs/tcn_ae_6f25ae0d" #PTQ model: tcn_ae_6f25ae0d
 SV_PTH = "realtime-microled/tcn4"
 FILES = ["input_time_series.mem", "encoder_output.mem", "recieved_time.mem", "decoder_output.mem"]
 
@@ -77,10 +71,10 @@ if __name__ == "__main__":
         #print(f"recieved av power: {torch.square(torch.mean(recieved_time))}")
         #print(f"decoded av power: {torch.square(torch.mean(decoded_time))}")
 
-        #print(f"encoded average: {torch.mean(outp)}")
+        print(f"encoded average: {torch.mean(outp)}")
         #print(f"encoded max: {torch.max(outp)}")
         #print(f"encoded min: {torch.min(outp)}")
-        #print(f"decoded average: {torch.mean(decoded_time)}")
+        print(f"decoded average: {torch.mean(decoded_time)}")
         #print(f"decoded max: {torch.max(decoded_time)}")
         #print(f"decoded min: {torch.min(decoded_time)}\n")
     
@@ -99,19 +93,19 @@ if __name__ == "__main__":
 
     freq_tensors = [ed_gs._frame_to_freq(time_tensors[0], OFDM_CONFIG), ed_gs._frame_to_freq(time_tensors[1], OFDM_CONFIG), ed_gs._frame_to_freq(time_tensors[2], OFDM_CONFIG), ed_gs._frame_to_freq(time_tensors[3], OFDM_CONFIG)]
     
-    evm = evm_pct(freq_tensors[0], freq_tensors[3]).item()
+    evm_sv = evm_pct(freq_tensors[0], freq_tensors[3]).item()
     rrmse = calculate_per_burst_rrmse_pct_loss(freq_tensors[0], freq_tensors[3])
     print("SystemVerilog TCN Performance Metrics:")
-    print(f"EVM: {evm}")
+    print(f"EVM: {evm_sv}")
     print(f"RRMSE: {rrmse}\n")
 
-    evm = evm_pct(py_freq[0], py_freq[3]).item()
+    evm_py = evm_pct(py_freq[0], py_freq[3]).item()
     rrmse = calculate_per_burst_rrmse_pct_loss(py_freq[0], py_freq[3])
     print("Pytorch TCN Performance Metrics:")
-    print(f"EVM: {evm}")
+    print(f"EVM: {evm_py}")
     print(f"RRMSE: {rrmse}")
 
-    ed_gs._plot_constellation_enhanced_for_sv(run_dir=Path(os.path.join(base_pth, SV_PTH)), sv=freq_tensors, py=py_freq, freqs=OFDM_CONFIG.subcarrier_freqs_hz)
+    ed_gs._plot_constellation_enhanced_for_sv(run_dir=Path(os.path.join(base_pth, SV_PTH)), sv=freq_tensors, py=py_freq, freqs=OFDM_CONFIG.subcarrier_freqs_hz, evm_sv=evm_sv, evm_py=evm_py, channel_type="PTQ Q1.1")
 
     plt.plot(all_time_series[1][0:3760], label="SystemVerilog", marker='o')
     plt.plot(list(outp.detach().numpy().flatten())[0:3760], label="Pytorch", marker='s')

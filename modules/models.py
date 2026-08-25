@@ -58,9 +58,47 @@ def maybe_weight_norm(conv, enabled):
     when enabled. Normalizes the weights'''
     return torch.nn.utils.parametrizations.weight_norm(conv) if enabled else conv
 
+def quantize(x: torch.Tensor, frac_bits: int, data_width: int) -> torch.Tensor:
+    resolution = 2 **  (-frac_bits)
+    min = -2 ** (data_width - 1)
+    max = 2 ** (data_width - 1) - 1
+    quantized = resolution * torch.clamp(torch.floor(x / resolution + 0.5), min, max)
+
+    return x + (quantized - x).detach()
+
+def quantize_round(x: torch.Tensor, frac_bits: int) -> torch.Tensor:
+    """Round-to-nearest onto the fixed-point grid, no clamp.
+    Matches Q88multiply's `(a*b) >>> qBitShift` with the rounding fix applied,
+    used for individual per-tap products (which are never clipped in the
+    current SV, only the accumulator's final output is)."""
+    resolution = 2 ** (-frac_bits)
+    rounded = resolution * torch.floor(x / resolution + 0.5)
+    return x + (rounded - x).detach()
+
+def quantized_conv1d(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor,
+                      dilation: int, frac_bits: int) -> torch.Tensor:
+    """Conv1d where every weight*input product is individually rounded to the
+    fixed-point grid before being summed, replicating hidden_channel_block's
+    per-tap accumulation. x, weight, bias must already be quantize()'d
+    (clamped) before calling this — this function only rounds the products.
+    """
+    B, Cin, Tp = x.shape
+    Cout, _, K = weight.shape
+    T_out = Tp - (K - 1) * dilation
+    acc = x.new_zeros(B, Cout, T_out)
+    for k in range(K):
+        start = k * dilation
+        x_slice = x[:, :, start:start + T_out]                       # [B, Cin, T_out]
+        w_k = weight[:, :, k]                                        # [Cout, Cin]
+        prod = x_slice.unsqueeze(1) * w_k.unsqueeze(0).unsqueeze(-1)  # [B, Cout, Cin, T_out]
+        prod = quantize_round(prod, frac_bits)                       # round EACH tap's product, no clip
+        acc = acc + prod.sum(dim=2)                                  # accumulate in full precision, like the int accumulator
+    if bias is not None:
+        acc = acc + bias.view(1, -1, 1)
+    return acc
 
 class TCNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation, activation, weight_norm=False):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation, activation, weight_norm=False, quantization=False):
         super().__init__()
         self.conv = maybe_weight_norm(nn.Conv1d(
             in_channels,
@@ -72,19 +110,42 @@ class TCNBlock(nn.Module):
         self.padding = (kernel_size - 1) * dilation
         self.activation = make_activation(activation)
         self.resample = None
+        self.quantization = quantization
         if in_channels != out_channels:
             self.resample = maybe_weight_norm(nn.Conv1d(in_channels, out_channels, kernel_size=1), weight_norm)
 
     def forward(self, x):
-        out = F.pad(x, (self.padding, 0))
-        out = self.conv(out)
-        out = self.activation(out)
-        if self.resample:
-            x = self.resample(x)
-        return out + x # residual connection
+        if not self.quantization:
+            out = F.pad(x, (self.padding, 0))
+            out = self.conv(out)
+            out = self.activation(out)
+            if self.resample:
+                x = self.resample(x)
+            return out + x  # residual connection
+        else:
+            x = quantize(x, self.quantization, self.quantization * 2)
+            out = F.pad(x, (self.padding, 0))
+            out = quantized_conv1d(
+                out,
+                quantize(self.conv.weight, self.quantization, self.quantization * 2),
+                quantize(self.conv.bias, self.quantization, self.quantization * 2),
+                dilation=self.conv.dilation[0],
+                frac_bits=self.quantization,
+            )
+            out = self.activation(out)
+            if self.resample:
+                x = quantized_conv1d(
+                    quantize(x, self.quantization, self.quantization * 2),
+                    quantize(self.resample.weight, self.quantization, self.quantization * 2),
+                    quantize(self.resample.bias, self.quantization, self.quantization * 2),
+                    dilation=1,
+                    frac_bits=self.quantization,
+                )
+            return quantize((out + x), self.quantization, self.quantization * 2)
+
 
 class TCN(nn.Module):
-    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32,
+    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32, quantization=False,
                  *, activation):
         super().__init__()
         layers = []
@@ -92,11 +153,12 @@ class TCN(nn.Module):
         for i in range(nlayers):
             dilation = dilation_base ** i
             layers.append(
-                TCNBlock(in_channels, hidden_channels, kernel_size, dilation, activation)
+                TCNBlock(in_channels, hidden_channels, kernel_size, dilation, activation, quantization=quantization)
             )
             in_channels = hidden_channels
         self.tcn = nn.Sequential(*layers)
         self.readout = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+        self.quantization = quantization
 
         # Calculate the total receptive field for the whole TCN stack
         self.receptive_field = 1
@@ -106,9 +168,18 @@ class TCN(nn.Module):
 
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]
-        out = self.tcn(x)     # [B,H,T]
-        out = self.readout(out).squeeze(1)
-        #out = out - out.mean(dim=1, keepdim=True)  # [B,T]
+        out = self.tcn(x)       # [B,H,T]
+        if self.quantization:
+            out = quantized_conv1d(
+                quantize(out, self.quantization, self.quantization * 2),
+                quantize(self.readout.weight, self.quantization, self.quantization * 2),
+                quantize(self.readout.bias, self.quantization, self.quantization * 2),
+                dilation=1,
+                frac_bits=self.quantization,
+            ).squeeze(1)
+            out = quantize(out, self.quantization, self.quantization * 2)
+        else:
+            out = self.readout(out).squeeze(1)
         return out
 
     def get_num_params(self):

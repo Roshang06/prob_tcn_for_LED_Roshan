@@ -8,24 +8,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.chdir(Path(__file__).resolve().parents[1])
 
 from modules.grid_search.adapters import TCNAdapter
+from generate_Q88_time_frames import DATA_WIDTH, float_to_q88_int, q88_int_to_hex
 
 def q88_hex_to_float(hexa: str):
+    sign_bit = 1 << (DATA_WIDTH - 1)
     v = int(hexa, 16)
-    if v & 0x8000:  # If the sign bit is set (negative)
-        v -= 0x10000
-    return v/256
-
-def float_to_q88_int(x: float) -> int:
-    """Convert float → 16-bit Q8.8 signed integer."""
-    scaled = int(round(x * 256))
-    return max(-32768, min(32767, scaled)) # question: why is this capping it at 32768
-
-
-def q88_int_to_hex(v: int) -> str:
-    """Format a signed Q8.8 integer as 4-digit hex (two's complement)."""
-    # Python's % operator handles negative numbers differently from C,
-    # so we mask to 16 bits to get two's complement representation.
-    return f"{v & 0xFFFF:04x}"
+    if v & sign_bit:  # If the sign bit is set (negative)
+        v -= 1 << DATA_WIDTH
+    return v / pow(2, DATA_WIDTH // 2)
 
 def save_mem_file(path: str, values: list, comment: str = ""):
     """Save a list of Q8.8 integers to a .mem file (hex, one per line)."""
@@ -54,7 +44,7 @@ def send_through_channel(sent_time):
             return rec_time_tensor[0] # 0 for noise, 1 for mean
 
 
-CHANNEL_PTH = f"prob_tcn_for_LED/data/experiments/test_real_gridsearch/channel_models_20260810_1210/runs/tcn_4712cb05"
+CHANNEL_PTH = "prob_tcn_for_LED/data/experiments/test_real_gridsearch/channel_models_20260824_1456/runs/tcn_b338d2dc"
 SV_PTH = "realtime-microled/tcn4"
 
 base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

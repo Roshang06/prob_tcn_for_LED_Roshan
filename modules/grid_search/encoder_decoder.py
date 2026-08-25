@@ -24,7 +24,7 @@ from modules.models import TCN
 from modules.utils import (calculate_BER, calculate_per_burst_rrmse_pct_loss, evm_pct, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time, correlation)
 
-ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation")
+ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation", "quantization")
 
 
 class EncoderDecoderGridSearch(GridSearchBase):
@@ -384,7 +384,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S").replace(" ", "").replace(":", "-")
         fig.savefig(run_dir / "plots" / f"constellation_{sent_title}_{rec_title}_{current_time}.png", dpi=120)
 
-    def _plot_constellation_enhanced_for_sv(self, run_dir, sv, py, freqs, channel_id=None, channel_type=None, evm=None):
+    def _plot_constellation_enhanced_for_sv(self, run_dir, sv, py, freqs, channel_id=None, channel_type=None, evm_sv=None, evm_py=None):
         '''Sent vs received QPSK symbols on the active carriers, coloured by
         carrier frequency. Received plot overlays sent symbols as red X markers for reference.'''
         if len(sv) < 4 or len(py) < 4:
@@ -415,9 +415,9 @@ class EncoderDecoderGridSearch(GridSearchBase):
             ("Recieved", "Decoded", 2, 3),
             ("Sent", "Decoded", 0, 3),
         ]
-        rows = [(sv, "SystemVerilog"), (py, "Pytorch")]
+        rows = [(sv, "SystemVerilog", evm_sv), (py, "Pytorch", evm_py)]
 
-        for row_idx, (tensor_list, label) in enumerate(rows):
+        for row_idx, (tensor_list, label, row_evm) in enumerate(rows):
             for pair_idx, (left_name, right_name, left_idx, right_idx) in enumerate(pairs):
                 left_ax = axes[row_idx, pair_idx * 2]
                 right_ax = axes[row_idx, pair_idx * 2 + 1]
@@ -426,6 +426,16 @@ class EncoderDecoderGridSearch(GridSearchBase):
                 plot_stage(right_ax, tensor_list[right_idx], freqs,
                            f"{right_name} ({label}) ref: {left_name}", reference=tensor_list[left_idx])
 
+            # Last plot in the row is the "Decoded" plot (pair_idx=3, right_ax) —
+            # annotate its EVM just to the right of it.
+            if row_evm is not None:
+                last_ax = axes[row_idx, -1]
+                last_ax.text(1.15, 0.5, f"EVM={row_evm:.2f}%",
+                              transform=last_ax.transAxes,
+                              fontsize=11, fontweight="bold",
+                              ha="left", va="center",
+                              rotation=0)
+
         fig.colorbar(axes[0, 0].collections[0], ax=axes.flatten().tolist(), label="Carrier Frequency (Hz)")
 
         title_parts = []
@@ -433,8 +443,6 @@ class EncoderDecoderGridSearch(GridSearchBase):
             title_parts.append(channel_id)
         if channel_type:
             title_parts.append(channel_type)
-        if evm is not None:
-            title_parts.append(f"EVM={evm:.2f}%")
         if title_parts:
             fig.suptitle(f"{run_dir.name} — " + " | ".join(title_parts))
         else:
