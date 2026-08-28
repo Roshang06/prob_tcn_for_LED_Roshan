@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.chdir(Path(__file__).resolve().parents[1])
 
 from modules.grid_search.adapters import TCNAdapter
-from generate_Q88_time_frames import DATA_WIDTH, float_to_q88_int, q88_int_to_hex
+from generate_Q88_time_frames import DATA_WIDTH, SAVE_PATH, float_to_q88_int, q88_int_to_hex
 
 def q88_hex_to_float(hexa: str):
     sign_bit = 1 << (DATA_WIDTH - 1)
@@ -43,9 +43,26 @@ def send_through_channel(sent_time):
     
             return rec_time_tensor[0] # 0 for noise, 1 for mean
 
+def Execute_Channel():
+    with open(os.path.join(base_pth, CHANNEL_PTH, "config.yaml"), "r") as file:
+        sent_time = [[]]
+
+        with open(os.path.join(base_pth, SAVE_PATH, "encoder_output.mem"), "r") as file:
+            for line in file:
+                line = line.strip()
+                if line[0:2] != "//":
+                    num = q88_hex_to_float(line)
+                    sent_time[0].append(num)
+
+        recieved_time = send_through_channel(torch.tensor(sent_time)).detach().cpu().numpy().flatten()
+
+        words = []
+        for sample in recieved_time:
+            words.append(q88_int_to_hex(float_to_q88_int(sample)))
+        save_mem_file(os.path.join(base_pth, SAVE_PATH, "recieved_time.mem"), words, f"Sent through the channel model")
+
 
 CHANNEL_PTH = "prob_tcn_for_LED/data/experiments/test_real_gridsearch/channel_models_20260824_1456/runs/tcn_b338d2dc"
-SV_PTH = "realtime-microled/tcn4"
 
 base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -55,7 +72,7 @@ if __name__ == "__main__":
     with open(os.path.join(base_pth, CHANNEL_PTH, "config.yaml"), "r") as file:
         sent_time = [[]]
 
-        with open(os.path.join(base_pth, SV_PTH, "encoder_output.mem"), "r") as file:
+        with open(os.path.join(base_pth, SAVE_PATH, "encoder_output.mem"), "r") as file:
             for line in file:
                 line = line.strip()
                 if line[0:2] != "//":
@@ -71,6 +88,6 @@ if __name__ == "__main__":
         words = []
         for sample in recieved_time:
             words.append(q88_int_to_hex(float_to_q88_int(sample)))
-        save_mem_file(os.path.join(base_pth, SV_PTH, "recieved_time.mem"), words, f"Sent through the channel model")
+        save_mem_file(os.path.join(base_pth, SAVE_PATH, "recieved_time.mem"), words, f"Sent through the channel model")
 
 

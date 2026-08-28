@@ -58,10 +58,10 @@ def read_dataset(path, n_frames: int = 64) -> torch.Tensor:#tuple[torch.Tensor, 
 
 
 READ_PATH = "prob_tcn_for_LED/data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
-SAVE_PATH = f"realtime-microled/tcn4"
+SAVE_PATH = f"prob_tcn_for_LED/sv_tcn/tcn5"
 WAVEFORMS = 4
 TYPE = "Synthetic"# Synthetic, Real, Step
-DATA_WIDTH = 2
+DATA_WIDTH = 16
 base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 ed_gs = EncoderDecoderGridSearch(
@@ -99,6 +99,17 @@ def create_sent_time():
         return time_series
     else:
         raise ValueError("TYPE was not correctly specified.")
+
+def writeSentTime():
+    sent_time= create_sent_time()
+
+    time_series = []
+    tensor_time_series = sent_time.detach().cpu().numpy()
+    for burst in tensor_time_series:    
+            for point in burst:
+                time_series.append(q88_int_to_hex(float_to_q88_int(point)))
+
+    save_mem_file(os.path.join(base_pth, SAVE_PATH, "input_time_series.mem"), time_series, "OFDM modulated time series - includes cyclic prefix and preamble")
 
 if __name__ == "__main__":
 
