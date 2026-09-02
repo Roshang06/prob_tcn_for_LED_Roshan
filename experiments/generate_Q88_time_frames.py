@@ -10,23 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.chdir(Path(__file__).resolve().parents[1])
 
 from modules.grid_search import EncoderDecoderGridSearch
+from modules.utils import q88_int_to_hex, float_to_q88_int
 from test_real_gridsearch import (
     OFDM_CONFIG, ENCODER_DECODER_GRID
 )
-
-def float_to_q88_int(x: float) -> int:
-    """Convert float → 16-bit Q8.8 signed integer."""
-    scale_factor = DATA_WIDTH // 2
-    maximum = pow(2, DATA_WIDTH-1) - 1
-    minimum = -1 * pow(2, DATA_WIDTH-1)
-    scaled = int(round(x * pow(2, scale_factor)))
-    return max(minimum, min(maximum, scaled))
-
-def q88_int_to_hex(v: int) -> str:
-    """Format a signed Q8.8 integer as 4-digit hex (two's complement), variable for other notations"""
-    mask = (1 << DATA_WIDTH) - 1
-    hex_digits = math.ceil(DATA_WIDTH / 4)
-    return f"{v & mask:0{hex_digits}x}"
 
 def save_mem_file(path: str, values: list, comment: str = ""):
     """Save a list of Q8.8 integers to a .mem file (hex, one per line)."""
@@ -60,8 +47,8 @@ def read_dataset(path, n_frames: int = 64) -> torch.Tensor:#tuple[torch.Tensor, 
 READ_PATH = "prob_tcn_for_LED/data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
 SAVE_PATH = f"prob_tcn_for_LED/sv_tcn/tcn5"
 WAVEFORMS = 4
-TYPE = "Synthetic"# Synthetic, Real, Step
 DATA_WIDTH = 16
+TYPE = "Synthetic"# Synthetic, Real, Step
 base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 ed_gs = EncoderDecoderGridSearch(
@@ -100,16 +87,16 @@ def create_sent_time():
     else:
         raise ValueError("TYPE was not correctly specified.")
 
-def writeSentTime():
+def writeSentTime(save_pth, datawidth):
     sent_time= create_sent_time()
 
     time_series = []
     tensor_time_series = sent_time.detach().cpu().numpy()
     for burst in tensor_time_series:    
             for point in burst:
-                time_series.append(q88_int_to_hex(float_to_q88_int(point)))
+                time_series.append(q88_int_to_hex(float_to_q88_int(point, data_width=datawidth), data_width=datawidth))
 
-    save_mem_file(os.path.join(base_pth, SAVE_PATH, "input_time_series.mem"), time_series, "OFDM modulated time series - includes cyclic prefix and preamble")
+    save_mem_file(os.path.join(base_pth, save_pth, "input_time_series.mem"), time_series, "OFDM modulated time series - includes cyclic prefix and preamble")
 
 if __name__ == "__main__":
 
@@ -128,7 +115,7 @@ if __name__ == "__main__":
 
     for burst in tensor_time_series:    
          for point in burst:
-              time_series.append(q88_int_to_hex(float_to_q88_int(point)))
+              time_series.append(q88_int_to_hex(float_to_q88_int(point, DATA_WIDTH), DATA_WIDTH))
 
     save_mem_file(os.path.join(base_pth, SAVE_PATH, "input_time_series.mem"), time_series, "OFDM modulated time series - includes cyclic prefix and preamble")
     

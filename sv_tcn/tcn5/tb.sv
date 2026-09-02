@@ -4,14 +4,14 @@ module tb ();
 
 parameter int DATA_WIDTH = 16;
 parameter string MODEL_TYPE = "encoder";
-parameter int TEST = 8;
+parameter int TEST = 1;
 localparam int K = 5;
 localparam int L = 3;
 localparam int D = 2;
 localparam int HC = 8;
 
 localparam BUFFER_TIME = 10;
-localparam SAMPLES = 3760;
+parameter SAMPLES = 10;
 localparam CLK_TIME = 3;
 localparam UPDATE_TIME = ((K * HC + 1)*(CLK_TIME*2) + BUFFER_TIME); //calculates time before the next input is sent in
 localparam FINISH_TIME = SAMPLES * UPDATE_TIME + (UPDATE_TIME*(L+1) + BUFFER_TIME);

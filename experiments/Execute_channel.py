@@ -8,14 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.chdir(Path(__file__).resolve().parents[1])
 
 from modules.grid_search.adapters import TCNAdapter
-from generate_Q88_time_frames import DATA_WIDTH, SAVE_PATH, float_to_q88_int, q88_int_to_hex
-
-def q88_hex_to_float(hexa: str):
-    sign_bit = 1 << (DATA_WIDTH - 1)
-    v = int(hexa, 16)
-    if v & sign_bit:  # If the sign bit is set (negative)
-        v -= 1 << DATA_WIDTH
-    return v / pow(2, DATA_WIDTH // 2)
+from modules.utils import q88_int_to_hex, q88_hex_to_float, float_to_q88_int
+from generate_Q88_time_frames import DATA_WIDTH, SAVE_PATH
 
 def save_mem_file(path: str, values: list, comment: str = ""):
     """Save a list of Q8.8 integers to a .mem file (hex, one per line)."""
@@ -43,7 +37,7 @@ def send_through_channel(sent_time):
     
             return rec_time_tensor[0] # 0 for noise, 1 for mean
 
-def Execute_Channel():
+def Execute_Channel(data_width):
     with open(os.path.join(base_pth, CHANNEL_PTH, "config.yaml"), "r") as file:
         sent_time = [[]]
 
@@ -51,14 +45,14 @@ def Execute_Channel():
             for line in file:
                 line = line.strip()
                 if line[0:2] != "//":
-                    num = q88_hex_to_float(line)
+                    num = q88_hex_to_float(line, data_width)
                     sent_time[0].append(num)
 
         recieved_time = send_through_channel(torch.tensor(sent_time)).detach().cpu().numpy().flatten()
 
         words = []
         for sample in recieved_time:
-            words.append(q88_int_to_hex(float_to_q88_int(sample)))
+            words.append(q88_int_to_hex(float_to_q88_int(sample, data_width), data_width))
         save_mem_file(os.path.join(base_pth, SAVE_PATH, "recieved_time.mem"), words, f"Sent through the channel model")
 
 
@@ -76,7 +70,7 @@ if __name__ == "__main__":
             for line in file:
                 line = line.strip()
                 if line[0:2] != "//":
-                    num = q88_hex_to_float(line)
+                    num = q88_hex_to_float(line, DATA_WIDTH)
                     sent_time[0].append(num)
 
         #rec_time_tensor = model.model((torch.tensor(sent_time)))
@@ -87,7 +81,7 @@ if __name__ == "__main__":
         #print(recieved_time)
         words = []
         for sample in recieved_time:
-            words.append(q88_int_to_hex(float_to_q88_int(sample)))
+            words.append(q88_int_to_hex(float_to_q88_int(sample, DATA_WIDTH), DATA_WIDTH))
         save_mem_file(os.path.join(base_pth, SAVE_PATH, "recieved_time.mem"), words, f"Sent through the channel model")
 
 

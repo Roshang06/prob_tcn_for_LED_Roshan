@@ -45,7 +45,7 @@ always_ff @(posedge clk) begin
 end
 //wire up hidden channels - Each hidden_channel_block gives you 1 output
 logic signed [0:KERNEL_SIZE*IN_CH-1][DATA_WIDTH-1:0] actual_input_reg;
-logic [OUT_CH-1:0][DATA_WIDTH-1:0] mac_output;
+logic [OUT_CH-1:0][DATA_WIDTH-1:0] hc_output;
 
 // flatten the input and exclude time steps ignored due to DIALATION
 // generate
@@ -68,11 +68,11 @@ generate
     for (genvar i = 0; i < OUT_CH; i++) begin: HC_inst
 
         hidden_channel_block #(.NUM_TAPS(KERNEL_SIZE*IN_CH), .DATA_WIDTH(DATA_WIDTH), .SKIPCONN(KERNEL_SIZE*i + (KERNEL_SIZE-1)), .TEST(TEST), .LAYER_NUM(LAYER_NUM), .HIDDEN_CH_NUM(i), .RESAMPLE(RESAMPLE), .MODEL_TYPE(MODEL_TYPE)) 
-                hc (.counter(counter), .input_reg(actual_input_reg), .clk(clk), .reset(reset), .out(mac_output[i]));
+                hc (.counter(counter), .input_reg(actual_input_reg), .clk(clk), .reset(reset), .out(hc_output[i]));
             
     end
 endgenerate
 
 assign ready = ready_reg;
-assign out = (ready)? mac_output: '0;
+assign out = (ready)? hc_output: '0;
 endmodule

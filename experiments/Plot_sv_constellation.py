@@ -11,12 +11,13 @@ os.chdir(Path(__file__).resolve().parents[1])
 from modules.models import TCN
 from modules.utils import evm_pct, calculate_per_burst_rrmse_pct_loss   
 from modules.grid_search.adapters import TCNAdapter
+from modules.utils import q88_hex_to_float
 from modules.grid_search import EncoderDecoderGridSearch, base
 from test_real_gridsearch import (
     OFDM_CONFIG, ENCODER_DECODER_GRID
 )
-from generate_Q88_time_frames import WAVEFORMS, read_dataset, READ_PATH, SAVE_PATH, create_sent_time
-from Execute_channel import send_through_channel, q88_hex_to_float
+from generate_Q88_time_frames import WAVEFORMS, read_dataset, READ_PATH, SAVE_PATH, create_sent_time, DATA_WIDTH
+from Execute_channel import send_through_channel
 from modules.experimental_blocks import band_limited_zc_preamble
 
 ed_gs = EncoderDecoderGridSearch(
@@ -33,14 +34,14 @@ FILES = ["input_time_series.mem", "encoder_output.mem", "recieved_time.mem", "de
 
 base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-def create_plots(ShowTimeSeries=False):
+def create_plots(data_width, ShowTimeSeries=False, ed_model_pth=ED_MODEL_PTH):
     py_freq = []
-    with open(os.path.join(base_pth, ED_MODEL_PTH, "config.yaml"), "r") as file:
+    with open(os.path.join(base_pth, ed_model_pth, "config.yaml"), "r") as file:
         config = yaml.safe_load(file)
         p = config["params"]
         arch = {k: p[k] for k in ARCH_KEYS}
         encoder = TCN(**arch).to("cpu")
-        checkpoint = torch.load(os.path.join(base_pth, ED_MODEL_PTH, "model.pt"), map_location="cpu", weights_only=True)
+        checkpoint = torch.load(os.path.join(base_pth, ed_model_pth, "model.pt"), map_location="cpu", weights_only=True)
         encoder.load_state_dict(checkpoint["encoder"])
         encoder.eval()
 
@@ -84,7 +85,7 @@ def create_plots(ShowTimeSeries=False):
                 for line in file:
                     line = line.strip()
                     if line[0:2] != "//":
-                        num = q88_hex_to_float(line)
+                        num = q88_hex_to_float(line, data_width)
                         time.append(num)
                 all_time_series.append(time)
 
@@ -104,7 +105,7 @@ def create_plots(ShowTimeSeries=False):
     print(f"EVM: {evm_py}")
     print(f"RRMSE: {rrmse}")
 
-    ed_gs._plot_constellation_enhanced_for_sv(run_dir=Path(os.path.join(base_pth, SAVE_PATH)), sv=freq_tensors, py=py_freq, freqs=OFDM_CONFIG.subcarrier_freqs_hz, evm_sv=evm_sv, evm_py=evm_py, channel_type="PTQ Q1.1")
+    ed_gs._plot_constellation_enhanced_for_sv(run_dir=Path(os.path.join(base_pth, SAVE_PATH)), sv=freq_tensors, py=py_freq, freqs=OFDM_CONFIG.subcarrier_freqs_hz, evm_sv=evm_sv, evm_py=evm_py, channel_type=f"QAT Q{data_width/2}.{data_width/2}")
 
     if ShowTimeSeries:
         plt.plot(all_time_series[1][0:3760], label="SystemVerilog", marker='o')
@@ -126,6 +127,8 @@ def create_plots(ShowTimeSeries=False):
         plt.title("Plotting Recived and Decoded")
         plt.legend()
         plt.show()
+
+    return evm_sv, evm_py
      
 
 if __name__ == "__main__":
@@ -179,7 +182,7 @@ if __name__ == "__main__":
                 for line in file:
                     line = line.strip()
                     if line[0:2] != "//":
-                        num = q88_hex_to_float(line)
+                        num = q88_hex_to_float(line, DATA_WIDTH)
                         time.append(num)
                 all_time_series.append(time)
 

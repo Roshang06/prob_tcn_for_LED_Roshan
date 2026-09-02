@@ -4,7 +4,7 @@ module tb ();
 
 parameter int DATA_WIDTH = 16;
 parameter string MODEL_TYPE = "encoder";
-parameter int TEST = 8;
+parameter int TEST = 1;
 localparam int K = 5;
 localparam int L = 3;
 localparam int D = 2;
