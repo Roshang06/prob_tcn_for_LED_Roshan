@@ -86,7 +86,7 @@ always begin
 end
 
 always @(posedge update_cycle) begin //attempting to simulate how data would come in
-    for (int i = 0; i < SAMPLES; i++) begin
+    for (int i = 0; i < SAMPLES-1; i++) begin
         all_samples[i] <= all_samples[i+1];
     end
     currentIn <= all_samples[0];

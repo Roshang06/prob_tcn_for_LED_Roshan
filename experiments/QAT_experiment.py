@@ -147,4 +147,4 @@ if __name__ == "__main__":
             py_evm.append(plot_dict[key][2])
             sv_evm.append(plot_dict[key][1])
 
-        plot_evm_vs_bitwidth(bit_widths, sv_evm, py_evm, out_path=os.path.join(sim_directory, "plots"))
+        plot_evm_vs_bitwidth(bit_widths, sv_evm, py_evm, out_path=os.path.join(sim_directory, "plots", "evm_vs_bitwidth.png"))

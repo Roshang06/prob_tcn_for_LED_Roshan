@@ -10,8 +10,8 @@ localparam int L = 3;
 localparam int D = 2;
 localparam int HC = 8;
 
-localparam BUFFER_TIME = 50;
-localparam SAMPLES = 10;
+localparam BUFFER_TIME = 500;
+parameter SAMPLES = 3760;
 localparam CLK_TIME = 3;
 localparam UPDATE_TIME = CLK_TIME*2; //calculates time before the next input is sent in
 localparam FINISH_TIME = SAMPLES * UPDATE_TIME + BUFFER_TIME;
@@ -25,18 +25,25 @@ logic signed [DATA_WIDTH-1:0] out;
 logic signed [DATA_WIDTH-1:0] currentIn;
 logic track_out;
 logic switch;
-//logic match;
-
+// logic match;
 logic clk;
 logic update_cycle;
 logic reset;
 
-
-tcn #(.TEST(TEST), .DATA_WIDTH(DATA_WIDTH), .KERNEL_SIZE(K), .LAYERS(L), .HIDDEN_CHANNELS(HC), .DIALATION_BASE(D), .MODEL_TYPE(MODEL_TYPE)) Network1 (
+tcn #(
+    .TEST(TEST), 
+    .DATA_WIDTH(DATA_WIDTH), 
+    .KERNEL_SIZE(K), .LAYERS(L), 
+    .HIDDEN_CHANNELS(HC), 
+    .DIALATION_BASE(D), 
+    .MODEL_TYPE(MODEL_TYPE)
+) Network1 (
     .clk(clk), 
     .in(currentIn), 
     .out(out), 
-    .reset(reset)
+    .reset(reset),
+    .data_valid_in(switch),
+    .data_valid_out(track_out)
 );
 
 initial begin
@@ -44,7 +51,6 @@ initial begin
     clk = 0;
     update_cycle = 0;
     reset = 1;
-    track_out = '0;
     if (MODEL_TYPE == "decoder") begin
         filePath = "recieved_time.mem";
     end
@@ -56,9 +62,9 @@ initial begin
 
     if (FINISH_TIME < 26634) begin
         $dumpfile("tb.vcd");
-        //$dumpvars(1, tb.currentIn, tb.out);
-        //$dumpvars(1, tb.clk, tb.reset, tb.update_cycle);
-        $dumpvars(0, tb);
+        $dumpvars(1, tb.currentIn, tb.out);
+        $dumpvars(1, tb.clk, tb.reset, tb.switch, tb.update_cycle, tb.Network1.yeet);
+        //$dumpvars(0, tb);
     end else begin
         $display("Not generating a waveform viewer because time units exceed 26634, at %0d time units.", FINISH_TIME);
     end
@@ -85,26 +91,28 @@ always begin
     if (samplenum < SAMPLES) begin
         update_cycle = ~update_cycle;
     end else begin
+        #(UPDATE_TIME)
         update_cycle = 0;
+        switch = 0;
     end
 end
 
 always @(posedge update_cycle) begin //attempting to simulate how data would come in
-    for (int i = 0; i < SAMPLES; i++) begin
+    for (int i = 0; i < SAMPLES-1; i++) begin
         all_samples[i] <= all_samples[i+1];
     end
     currentIn <= all_samples[0];
     samplenum++;
+    switch <= 1;
 end
 
 
 always @(posedge clk) begin
-    if (track_out != switch && !$isunknown(out)) begin
+    if (track_out) begin
         for (int i = 0; i < $size(allOutput)-1; i++) begin
             allOutput[i] <= allOutput[i+1];
         end
         allOutput[$size(allOutput)-1] <= out;
-        track_out <= switch;
     end
 end
 

@@ -19,13 +19,15 @@ end else begin: recursion
     localparam halfnum = NUM >> 1;
     logic signed [31:0] sum1;
     logic signed [31:0] sum2;
-    adder_tree_block # (.NUM(halfnum), .DATA_WIDTH(DATA_WIDTH)) subAdder1 (
+    adder_tree_block # (.NUM(halfnum), .DATA_WIDTH(DATA_WIDTH)) 
+    subAdder1 (
         .clk(clk), 
         .reset(reset), 
         .nums(nums[0:halfnum-1]), 
         .sum(sum1)
     );
-    adder_tree_block # (.NUM(NUM-halfnum), .DATA_WIDTH(DATA_WIDTH)) subAdder2 (
+    adder_tree_block # (.NUM(NUM-halfnum), .DATA_WIDTH(DATA_WIDTH)) 
+    subAdder2 (
         .clk(clk), 
         .reset(reset), 
         .nums(nums[halfnum:NUM-1]), 

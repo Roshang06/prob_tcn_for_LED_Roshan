@@ -30,13 +30,25 @@ logic signed [0:NUM_TAPS][31:0] rounded_out;
 logic signed [31:0] finalSum;
 always_ff @(posedge clk) begin
     if (reset) begin
-        rounded_out[NUM_TAPS] <= 31'($signed(bias[0]));
+        rounded_out[NUM_TAPS] <= 32'($signed(bias[0]));
     end
+    // if (LAYER_NUM == 0 && HIDDEN_CH_NUM == 0) begin
+    //     $display("Layer %0d Channel %0d", LAYER_NUM, HIDDEN_CH_NUM);
+    //     foreach (input_reg[i]) begin  
+    //         $display("      in_mux: %0d %f %h, weight_mux: %0d %f %h, Prod: %0d %f %h, Acc: %0d %f %h", 
+    //             input_reg[i],        real'(input_reg[i]) / 256.0,    input_reg[i], 
+    //             weights[i],          real'(weights[i]) / 256.0,      weights[i], 
+    //             rounded_out[i],      real'(rounded_out[i]) / 256.0,  rounded_out[i], 
+    //             finalSum,            real'(finalSum) / 256.0,        finalSum
+    //             );
+    //     end
+    // end
 end
 
 generate
     for (genvar i = 0; i < NUM_TAPS; i++) begin: multiply_inst
-        Qxxmultiply #(.DATA_WIDTH(DATA_WIDTH)) multiply_block (
+        Qxxmultiply #(.DATA_WIDTH(DATA_WIDTH)) 
+        multiply_block (
             .clk(clk), 
             .reset(reset), 
             .input_reg(input_reg[i]), 
@@ -46,11 +58,12 @@ generate
     end
 endgenerate
 
-adder_tree_block # (.NUM(NUM_TAPS+1), .DATA_WIDTH(32)) adder_tree (
+adder_tree_block # (.NUM(NUM_TAPS+1), .DATA_WIDTH(32)) 
+adder_tree (
     .clk(clk), 
     .reset(reset), 
-    .nums(rounded_out), 
-    .sum(finalSum)
+    .nums(rounded_out), //6
+    .sum(finalSum) //6 + 6
 );
 
 generate
@@ -71,7 +84,8 @@ generate
         // assign out = (accumulator >= 0) ?  Q88clip(accumulator + resampled_input): (resampled_input); //relu and resampled input
 
         int signed pre_bias;
-        Qxxmultiply # (.DATA_WIDTH(DATA_WIDTH)) resample_multiply_block (
+        Qxxmultiply # (.DATA_WIDTH(DATA_WIDTH)) 
+        resample_multiply_block (
             .clk(clk), 
             .reset(reset), 
             .input_reg(input_reg[NUM_TAPS-1]), 
@@ -83,8 +97,8 @@ generate
         int signed preclipped;
         int signed relu_applied;
 
-        localparam int delay = 2; // Formula for synchronization delay: delay = roundUpToInt(log_2(Kernel_size + 1)) - 1
-        logic signed [0:delay][DATA_WIDTH-1:0] waiting_area; 
+        localparam int delay = 2*$clog2(NUM_TAPS + 1) - 1; // Formula for synchronization delay (due to adder tree)
+        logic signed [0:delay][DATA_WIDTH-1:0] waiting_line; 
         always_ff @(posedge clk) begin
             if (reset) begin
                 unclipped_resampled_input <= 0;
@@ -92,24 +106,27 @@ generate
                 relu_applied <= 0;
             end else begin
                 unclipped_resampled_input <= pre_bias + resample_bias[0];
-                waiting_area[0] <= Q88clip(unclipped_resampled_input);
+                waiting_line[0] <= Q88clip(unclipped_resampled_input);
 
                 for (int i = 1; i <= delay; i++) begin
-                    waiting_area[i] <= waiting_area[i-1];
+                    waiting_line[i] <= waiting_line[i-1];
                 end
 
                 relu_applied <= (finalSum > 0) ? finalSum: 0;
-                preclipped <= relu_applied + waiting_area[delay];
-                out <= Q88clip(preclipped);
+                preclipped <= relu_applied + waiting_line[delay];
+                out <= Q88clip(preclipped); //out 12
             end
         end
-    end else if (RESAMPLE == 2) begin
+    end else if (RESAMPLE == 2) begin: readout
         //assign out = Q88clip(accumulator); //no relu or skip connection for the readout
         always_ff @(posedge clk) begin
-            if (!reset) out <= Q88clip(finalSum);
+            if (!reset) out <= Q88clip(finalSum); // out 10
         end
-    end else begin // Below is the default generation for all other layers
+    end else begin: middle_layer // Below is the default generation for all other layers
         //assign out = (accumulator >= 0) ?  Q88clip(accumulator + input_reg[SKIPCONN]): input_reg[SKIPCONN]; //relu and residual input added in
+        localparam int delay = 2*$clog2(NUM_TAPS + 1) + 5; // Formula for synchronization delay (due to adder tree and Qmutliply)
+        logic signed [0:delay][DATA_WIDTH-1:0] waiting_line;
+        
         int signed preclipped;
         int signed relu_applied;
         always_ff @(posedge clk) begin
@@ -117,9 +134,15 @@ generate
                 preclipped <= 0;
                 relu_applied <= 0;
             end else begin
+                waiting_line[0] <= input_reg[SKIPCONN];
+
+                for (int i = 1; i <= delay; i++) begin
+                    waiting_line[i] <= waiting_line[i-1];
+                end
+
                 relu_applied <= (finalSum > 0) ? finalSum: 0;
-                preclipped <= relu_applied + input_reg[SKIPCONN];
-                out <= Q88clip(preclipped);
+                preclipped <= relu_applied + waiting_line[delay];
+                out <= Q88clip(preclipped); // out 12
             end
         end
     end
@@ -133,56 +156,3 @@ function automatic int Q88clip(int signed a);
     else return a;
 endfunction
 endmodule
-
-/*
-localparam qBitShift = DATA_WIDTH/2;
-logic signed [0:NUM_TAPS][(DATA_WIDTH*2)-1:0] product; //bias is the last element, so this contains NUM_TAPS + 1 elements
-logic signed [0:NUM_TAPS][(DATA_WIDTH*2)-1:0] product_out;
-logic signed [0:NUM_TAPS][(DATA_WIDTH*2)-1:0] rounded;
-logic signed [0:NUM_TAPS][(DATA_WIDTH*2)-1:0] rounded_out;
-logic signed [0:NUM_TAPS-1][DATA_WIDTH-1:0] a;
-logic signed [0:NUM_TAPS-1][DATA_WIDTH-1:0] b;
-int signed finalSum;
-adder_tree_block # (.NUM(NUM_TAPS+1), .DATA_WIDTH(DATA_WIDTH*2)) adder_tree (.clk(clk), .reset(reset), .nums(rounded_out), .sum(finalSum));
-always_ff @(posedge clk) begin
-    if (reset) begin
-        for (int i = 0; i < NUM_TAPS; i++) begin
-            product[i] <= '0;
-        end
-        product[NUM_TAPS] <= (DATA_WIDTH*2)'(signed'(bias));
-        a <= '0;
-        b <= '0;
-        product_out <= '0;
-        rounded <= '0;
-        rounded_out <= '0;
-        finalSum <= '0;
-    end else begin
-        for (int i = 0; i < NUM_TAPS; i++) begin
-            a[i] <= input_reg[i];
-            b[i] <= weights[i];
-            product[i] <= a[i] * b[i];
-            product_out[i] <= product[i];
-            rounded[i] <= (product_out[i] + (1 <<< (qBitShift-1))) >>> qBitShift; //todo: bias isnt sent into adder tree
-            rounded_out[i] <= rounded[i];
-        end
-        // $display("Layer %0d Channel %0d", LAYER_NUM, HIDDEN_CH_NUM);
-        // $display("      in_mux: %0d %f %h, weight_mux: %0d %f %h, Prod: %0d %f %h, Acc: %0d %f %h", 
-        //     in_mux,              real'(in_mux) / 256.0,          in_mux, 
-        //     weight_mux,          real'(weight_mux) / 256.0,      weight_mux, 
-        //     product,                      real'(product) / 256.0,                  product, 
-        //     accumulator,                  real'(accumulator) / 256.0,              accumulator
-        //     );
-        
-    end
-end
-*/
-
-// helper functions
-// function automatic int Q88multiply(int a, int b);
-//     localparam int qBitShift = DATA_WIDTH/2;
-//     int prod;
-//     prod = (a * b + (1 <<< (qBitShift-1))) >>> qBitShift;
-//     return prod;
-// endfunction
-
-
