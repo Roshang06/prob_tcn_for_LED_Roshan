@@ -8,7 +8,6 @@ module Qxxmultiply # (parameter int DATA_WIDTH) (
 localparam qBitShift = DATA_WIDTH/2;
 logic signed [31:0] product;
 logic signed [31:0] product_out;
-logic signed [31:0] rounded;
 logic signed [DATA_WIDTH-1:0] a;
 logic signed [DATA_WIDTH-1:0] b;
 
@@ -18,14 +17,13 @@ always_ff @(posedge clk) begin
         b <= '0;
         product <= '0;
         product_out <= '0;
-        rounded <= '0;
+        final_product <= '0;
     end else begin
         a <= input_reg;
         b <= weight;
         product <= a * b;
         product_out <= product;
-        rounded <= (product_out + (1 <<< (qBitShift-1))) >>> qBitShift;
-        final_product <= rounded; 
+        final_product <= (product_out + (1 <<< (qBitShift-1))) >>> qBitShift;
     end
 end
 endmodule

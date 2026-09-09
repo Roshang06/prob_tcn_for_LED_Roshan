@@ -3,7 +3,7 @@
 module tcn_layer # (parameter TEST, DATA_WIDTH, DIALATION, IN_CH, OUT_CH, LAYER_NUM, KERNEL_SIZE, RESAMPLE, parameter [0:55] MODEL_TYPE) (
     input clk, reset,
     input signed [IN_CH-1:0][DATA_WIDTH-1:0] in,
-    output logic signed [OUT_CH-1:0][DATA_WIDTH-1:0] out
+    output signed [OUT_CH-1:0][DATA_WIDTH-1:0] out
 );
 logic signed [0:(KERNEL_SIZE-1)*DIALATION][IN_CH-1:0][DATA_WIDTH-1:0] input_reg;
 

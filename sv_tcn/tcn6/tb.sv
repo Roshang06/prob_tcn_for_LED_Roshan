@@ -11,7 +11,7 @@ localparam int D = 2;
 localparam int HC = 8;
 
 localparam BUFFER_TIME = 500;
-parameter SAMPLES = 3760;
+parameter SAMPLES = 5;
 localparam CLK_TIME = 3;
 localparam UPDATE_TIME = CLK_TIME*2; //calculates time before the next input is sent in
 localparam FINISH_TIME = SAMPLES * UPDATE_TIME + BUFFER_TIME;
@@ -51,6 +51,7 @@ initial begin
     clk = 0;
     update_cycle = 0;
     reset = 1;
+    switch <= 0;
     if (MODEL_TYPE == "decoder") begin
         filePath = "recieved_time.mem";
     end

@@ -13,11 +13,11 @@ from modules.utils import evm_pct, calculate_per_burst_rrmse_pct_loss
 from modules.grid_search.adapters import TCNAdapter
 from modules.utils import q88_hex_to_float
 from modules.grid_search import EncoderDecoderGridSearch, base
-from test_real_gridsearch import (
+from experiments.test_real_gridsearch import (
     OFDM_CONFIG, ENCODER_DECODER_GRID
 )
-from generate_Q88_time_frames import WAVEFORMS, read_dataset, READ_PATH, SAVE_PATH, create_sent_time, DATA_WIDTH
-from Execute_channel import send_through_channel
+from experiments.generate_Q88_time_frames import WAVEFORMS, SAVE_PATH, create_sent_time, DATA_WIDTH
+from experiments.Execute_channel import send_through_channel
 from modules.experimental_blocks import band_limited_zc_preamble
 
 ed_gs = EncoderDecoderGridSearch(
@@ -108,9 +108,9 @@ def create_plots(data_width, ShowTimeSeries=False, ed_model_pth=ED_MODEL_PTH):
     ed_gs._plot_constellation_enhanced_for_sv(run_dir=Path(os.path.join(base_pth, SAVE_PATH)), sv=freq_tensors, py=py_freq, freqs=OFDM_CONFIG.subcarrier_freqs_hz, evm_sv=evm_sv, evm_py=evm_py, channel_type=f"QAT Q{data_width/2}.{data_width/2}")
 
     if ShowTimeSeries:
-        plt.plot(all_time_series[1][0:3760], label="SystemVerilog", marker='o')
-        plt.plot(list(outp.detach().numpy().flatten())[0:3760], label="Pytorch", marker='s')
-        plt.plot(list(in_time.detach().numpy().flatten())[0:3760], label="input", marker='s')
+        plt.plot(all_time_series[1][0:(940 * WAVEFORMS)], label="SystemVerilog", marker='o')
+        plt.plot(list(outp.detach().numpy().flatten())[0:(940 * WAVEFORMS)], label="Pytorch", marker='s')
+        plt.plot(list(in_time.detach().numpy().flatten())[0:(940 * WAVEFORMS)], label="input", marker='s')
 
         plt.xlabel("Time Series")
         plt.ylabel("Output")
@@ -118,9 +118,9 @@ def create_plots(data_width, ShowTimeSeries=False, ed_model_pth=ED_MODEL_PTH):
         plt.legend()
         plt.show()
 
-        plt.plot(all_time_series[3][0:3760], label="SystemVerilog", marker='o')
-        plt.plot(list(decoded_time.detach().numpy().flatten())[0:3760], label="Pytorch", marker='s')
-        plt.plot(list(recieved_time.detach().numpy().flatten())[0:3760], label="input", marker='s')
+        plt.plot(all_time_series[3][0:(940 * WAVEFORMS)], label="SystemVerilog", marker='o')
+        plt.plot(list(decoded_time.detach().numpy().flatten())[0:(940 * WAVEFORMS)], label="Pytorch", marker='s')
+        plt.plot(list(recieved_time.detach().numpy().flatten())[0:(940 * WAVEFORMS)], label="input", marker='s')
 
         plt.xlabel("Time Series")
         plt.ylabel("Output")
@@ -204,9 +204,9 @@ if __name__ == "__main__":
 
     ed_gs._plot_constellation_enhanced_for_sv(run_dir=Path(os.path.join(base_pth, SAVE_PATH)), sv=freq_tensors, py=py_freq, freqs=OFDM_CONFIG.subcarrier_freqs_hz, evm_sv=evm_sv, evm_py=evm_py, channel_type="PTQ Q1.1")
 
-    plt.plot(all_time_series[1][0:3760], label="SystemVerilog", marker='o')
-    plt.plot(list(outp.detach().numpy().flatten())[0:3760], label="Pytorch", marker='s')
-    plt.plot(list(in_time.detach().numpy().flatten())[0:3760], label="input", marker='s')
+    plt.plot(all_time_series[1][0:(940 * WAVEFORMS)], label="SystemVerilog", marker='o')
+    plt.plot(list(outp.detach().numpy().flatten())[0:(940 * WAVEFORMS)], label="Pytorch", marker='s')
+    plt.plot(list(in_time.detach().numpy().flatten())[0:(940 * WAVEFORMS)], label="input", marker='s')
 
     plt.xlabel("Time Series")
     plt.ylabel("Output")
@@ -214,9 +214,9 @@ if __name__ == "__main__":
     plt.legend()
     plt.show()
 
-    plt.plot(all_time_series[3][0:3760], label="SystemVerilog", marker='o')
-    plt.plot(list(decoded_time.detach().numpy().flatten())[0:3760], label="Pytorch", marker='s')
-    plt.plot(list(recieved_time.detach().numpy().flatten())[0:3760], label="input", marker='s')
+    plt.plot(all_time_series[3][0:(940 * WAVEFORMS)], label="SystemVerilog", marker='o')
+    plt.plot(list(decoded_time.detach().numpy().flatten())[0:(940 * WAVEFORMS)], label="Pytorch", marker='s')
+    plt.plot(list(recieved_time.detach().numpy().flatten())[0:(940 * WAVEFORMS)], label="input", marker='s')
 
     plt.xlabel("Time Series")
     plt.ylabel("Output")

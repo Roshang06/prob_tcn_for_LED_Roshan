@@ -3,17 +3,16 @@ module adder_tree_block # (parameter int NUM, DATA_WIDTH) (
     input logic signed [0:NUM-1][DATA_WIDTH-1:0] nums,
     output logic signed [31:0] sum
 );
-logic signed [31:0] tmp_sum;
 
 if (NUM == 1) begin: base_case1
     always_ff @(posedge clk) begin
-        if (reset) tmp_sum <= '0;
-        else tmp_sum <= 32'($signed(nums[0]));
+        if (reset) sum <= '0;
+        else sum <= 32'($signed(nums[0]));
     end
 end else if (NUM == 2) begin: base_case2
     always_ff @(posedge clk) begin
-        if (reset) tmp_sum <= '0;
-        else tmp_sum <= 32'($signed(nums[0])) + 32'($signed(nums[1]));
+        if (reset) sum <= '0;
+        else sum <= 32'($signed(nums[0])) + 32'($signed(nums[1]));
     end
 end else begin: recursion
     localparam halfnum = NUM >> 1;
@@ -35,13 +34,9 @@ end else begin: recursion
     );
 
     always_ff @(posedge clk) begin
-        if (reset) tmp_sum <= '0;
-        else tmp_sum <= sum1 + sum2;
+        if (reset) sum <= '0;
+        else sum <= sum1 + sum2;
     end
 end
 
-always_ff @(posedge clk) begin
-    if (reset) sum <= '0;
-    else sum <= tmp_sum;
-end
 endmodule

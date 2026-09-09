@@ -11,7 +11,7 @@ os.chdir(Path(__file__).resolve().parents[1])
 
 from modules.grid_search import EncoderDecoderGridSearch
 from modules.utils import q88_int_to_hex, float_to_q88_int
-from test_real_gridsearch import (
+from experiments.test_real_gridsearch import (
     OFDM_CONFIG, ENCODER_DECODER_GRID
 )
 
@@ -46,7 +46,7 @@ def read_dataset(path, n_frames: int = 64) -> torch.Tensor:#tuple[torch.Tensor, 
 
 READ_PATH = "prob_tcn_for_LED/data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
 SAVE_PATH = f"prob_tcn_for_LED/sv_tcn/tcn6"
-WAVEFORMS = 4
+WAVEFORMS = 1
 DATA_WIDTH = 16
 TYPE = "Synthetic"# Synthetic, Real, Step
 base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

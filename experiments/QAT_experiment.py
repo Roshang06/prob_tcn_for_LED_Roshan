@@ -17,10 +17,10 @@ import os
 from pathlib import Path
 import torch
 import json
-from Execute_channel import Execute_Channel
-from generate_Q88_time_frames import writeSentTime
-from Plot_sv_constellation import create_plots
-from Plot_EVM_vs_BitWidth import plot_evm_vs_bitwidth
+from experiments.Execute_channel import Execute_Channel
+from experiments.generate_Q88_time_frames import writeSentTime
+from experiments.Plot_sv_constellation import create_plots
+from experiments.Plot_EVM_vs_BitWidth import plot_evm_vs_bitwidth
 from modules.utils import q88_int_to_hex, float_to_q88_int
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -73,6 +73,7 @@ def read_model(read_pth, save_pth, datawidth):
 sim_directory = "sv_tcn/tcn5"
 SAVE_PATH = f"prob_tcn_for_LED/{sim_directory}"
 GRID_SEARCH = "prob_tcn_for_LED/data/experiments/test_real_gridsearch/encoder_decoder_20260825_1207"
+CHANNEL_PTH = "prob_tcn_for_LED/data/experiments/test_real_gridsearch/channel_models_20260825_1204/runs/tcn_b338d2dc"
 
 
 if __name__ == "__main__":
@@ -115,7 +116,7 @@ if __name__ == "__main__":
                     check=True,
                 )
             
-                Execute_Channel(quantization*2)
+                Execute_Channel(quantization*2, CHANNEL_PTH, SAVE_PATH)
             
                 result3 = subprocess.run(
                     ["iverilog", "-g2012", "-P", f'tb.MODEL_TYPE="decoder"', "-P", f"tb.TEST={testNum}", "-P", f"tb.DATA_WIDTH={quantization*2}", "-P", f"tb.SAMPLES={3760}", "-o", "tb.vvp", "tb.sv"],
@@ -148,3 +149,5 @@ if __name__ == "__main__":
             sv_evm.append(plot_dict[key][1])
 
         plot_evm_vs_bitwidth(bit_widths, sv_evm, py_evm, out_path=os.path.join(sim_directory, "plots", "evm_vs_bitwidth.png"))
+        # plot latency and throughput
+        # plot energy

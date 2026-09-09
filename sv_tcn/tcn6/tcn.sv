@@ -53,7 +53,10 @@ generate
     end
 endgenerate
 // 1: the in gets placed into input_reg, 5: Qxxmultiply, 2*$clog2(KERNEL_SIZE*HIDDEN_CHANNELS + 1): adder tree, 3: Relu, skip connection, and placing into the output reg
-localparam latency = (1 + 5 + 2*$clog2(KERNEL_SIZE + 1) + 3) + ((LAYERS-1) * (1 + 5 + 2*$clog2(KERNEL_SIZE*HIDDEN_CHANNELS + 1) + 3)) + (1 + 5 + 2*$clog2(HIDDEN_CHANNELS + 1) + 1); 
+localparam latency = (1 + 4 + $clog2(KERNEL_SIZE + 1) + 3) + ((LAYERS-1) * (1 + 4 + $clog2(KERNEL_SIZE*HIDDEN_CHANNELS + 1) + 3)) + (1 + 4 + $clog2(HIDDEN_CHANNELS + 1) + 1); 
+initial begin
+    $display("Network Latency: %0d", latency);
+end
 logic [latency-1:0] counter;
 wire yeet;
 assign yeet = counter[0];

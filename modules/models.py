@@ -6,8 +6,6 @@ import torch.nn.functional as F
 from torch.distributions.studentT import StudentT
 import matplotlib.pyplot as plt
 
-
-
 ACTIVATIONS = {
     "relu": nn.ReLU,
     "gelu": nn.GELU,
@@ -16,33 +14,10 @@ ACTIVATIONS = {
     "softplus": nn.Softplus,
 }
 
-
 def make_activation(name):
     if name not in ACTIVATIONS:
         raise ValueError(f"unknown activation {name!r}, expected one of {sorted(ACTIVATIONS)}")
     return ACTIVATIONS[name]()
-
-
-def maybe_weight_norm(conv, enabled):
-    '''Reparameterize a conv's weight as magnitude x direction (Salimans & Kingma 2016)
-    when enabled. Normalizes the weights'''
-    return torch.nn.utils.parametrizations.weight_norm(conv) if enabled else conv
-
-
-ACTIVATIONS = {
-    "relu": nn.ReLU,
-    "gelu": nn.GELU,
-    "silu": nn.SiLU,
-    "tanh": nn.Tanh,
-    "softplus": nn.Softplus,
-}
-
-
-def make_activation(name):
-    if name not in ACTIVATIONS:
-        raise ValueError(f"unknown activation {name!r}, expected one of {sorted(ACTIVATIONS)}")
-    return ACTIVATIONS[name]()
-
 
 def maybe_weight_norm(conv, enabled):
     '''Reparameterize a conv's weight as magnitude x direction (Salimans & Kingma 2016)
@@ -89,7 +64,7 @@ def quantized_conv1d(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor,
     return acc
 
 class TCNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation, activation, weight_norm=False, quantization=False):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation, activation, weight_norm=False, quantization=None, **kwargs):
         super().__init__()
         self.conv = maybe_weight_norm(nn.Conv1d(
             in_channels,
@@ -137,7 +112,7 @@ class TCNBlock(nn.Module):
 
 class TCN(nn.Module):
     def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32, quantization=False,
-                 *, activation):
+                 *, activation, **kwargs):
         super().__init__()
         layers = []
         in_channels = 1
@@ -156,6 +131,10 @@ class TCN(nn.Module):
         for i in range(nlayers):
             dilation = dilation_base ** i
             self.receptive_field += (kernel_size - 1) * dilation
+
+        print("The following is kwargs:")
+        print(kwargs)
+        print("--")
 
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]

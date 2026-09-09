@@ -32,7 +32,7 @@ always_ff @(posedge clk) begin
     if (reset) begin
         rounded_out[NUM_TAPS] <= 32'($signed(bias[0]));
     end
-    // if (LAYER_NUM == 0 && HIDDEN_CH_NUM == 0) begin
+    // if (LAYER_NUM == 2 && HIDDEN_CH_NUM == 0) begin
     //     $display("Layer %0d Channel %0d", LAYER_NUM, HIDDEN_CH_NUM);
     //     foreach (input_reg[i]) begin  
     //         $display("      in_mux: %0d %f %h, weight_mux: %0d %f %h, Prod: %0d %f %h, Acc: %0d %f %h", 
@@ -97,13 +97,15 @@ generate
         int signed preclipped;
         int signed relu_applied;
 
-        localparam int delay = 2*$clog2(NUM_TAPS + 1) - 1; // Formula for synchronization delay (due to adder tree)
+        localparam int delay = $clog2(NUM_TAPS + 1) - 1; // Formula for synchronization delay (due to adder tree)
         logic signed [0:delay][DATA_WIDTH-1:0] waiting_line; 
         always_ff @(posedge clk) begin
             if (reset) begin
                 unclipped_resampled_input <= 0;
                 preclipped <= 0;
                 relu_applied <= 0;
+                out <= '0;
+                waiting_line <= '0;
             end else begin
                 unclipped_resampled_input <= pre_bias + resample_bias[0];
                 waiting_line[0] <= Q88clip(unclipped_resampled_input);
@@ -115,16 +117,21 @@ generate
                 relu_applied <= (finalSum > 0) ? finalSum: 0;
                 preclipped <= relu_applied + waiting_line[delay];
                 out <= Q88clip(preclipped); //out 12
+
+                // if (LAYER_NUM == 0 && HIDDEN_CH_NUM == 0) begin
+                //     $display("Resample Input reg: %0d %h", waiting_line[delay] ,waiting_line[delay]);
+                // end
             end
         end
     end else if (RESAMPLE == 2) begin: readout
         //assign out = Q88clip(accumulator); //no relu or skip connection for the readout
         always_ff @(posedge clk) begin
-            if (!reset) out <= Q88clip(finalSum); // out 10
+            if (reset)  out <= '0;
+            else out <= Q88clip(finalSum); // out 10
         end
     end else begin: middle_layer // Below is the default generation for all other layers
         //assign out = (accumulator >= 0) ?  Q88clip(accumulator + input_reg[SKIPCONN]): input_reg[SKIPCONN]; //relu and residual input added in
-        localparam int delay = 2*$clog2(NUM_TAPS + 1) + 5; // Formula for synchronization delay (due to adder tree and Qmutliply)
+        localparam int delay = $clog2(NUM_TAPS + 1) + 4; // Formula for synchronization delay (due to adder tree and Qmutliply)
         logic signed [0:delay][DATA_WIDTH-1:0] waiting_line;
         
         int signed preclipped;
@@ -133,6 +140,8 @@ generate
             if (reset) begin
                 preclipped <= 0;
                 relu_applied <= 0;
+                out <= '0;
+                waiting_line <= '0;
             end else begin
                 waiting_line[0] <= input_reg[SKIPCONN];
 
@@ -142,7 +151,11 @@ generate
 
                 relu_applied <= (finalSum > 0) ? finalSum: 0;
                 preclipped <= relu_applied + waiting_line[delay];
-                out <= Q88clip(preclipped); // out 12
+                out <= Q88clip(preclipped); // out 15
+
+                // if (LAYER_NUM == 2 && HIDDEN_CH_NUM == 0) begin
+                //     $display("Skipconn reg: %0d", waiting_line[delay]);
+                // end
             end
         end
     end

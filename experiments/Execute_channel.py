@@ -9,7 +9,6 @@ os.chdir(Path(__file__).resolve().parents[1])
 
 from modules.grid_search.adapters import TCNAdapter
 from modules.utils import q88_int_to_hex, q88_hex_to_float, float_to_q88_int
-from generate_Q88_time_frames import DATA_WIDTH, SAVE_PATH
 
 def save_mem_file(path: str, values: list, comment: str = ""):
     """Save a list of Q8.8 integers to a .mem file (hex, one per line)."""
@@ -37,11 +36,11 @@ def send_through_channel(sent_time):
     
             return rec_time_tensor[0] # 0 for noise, 1 for mean
 
-def Execute_Channel(data_width):
-    with open(os.path.join(base_pth, CHANNEL_PTH, "config.yaml"), "r") as file:
+def Execute_Channel(data_width, Channel_pth, Save_pth):
+    with open(os.path.join(base_pth, Channel_pth, "config.yaml"), "r") as file:
         sent_time = [[]]
 
-        with open(os.path.join(base_pth, SAVE_PATH, "encoder_output.mem"), "r") as file:
+        with open(os.path.join(base_pth, Save_pth, "encoder_output.mem"), "r") as file:
             for line in file:
                 line = line.strip()
                 if line[0:2] != "//":
@@ -53,10 +52,12 @@ def Execute_Channel(data_width):
         words = []
         for sample in recieved_time:
             words.append(q88_int_to_hex(float_to_q88_int(sample, data_width), data_width))
-        save_mem_file(os.path.join(base_pth, SAVE_PATH, "recieved_time.mem"), words, f"Sent through the channel model")
+        save_mem_file(os.path.join(base_pth, Save_pth, "recieved_time.mem"), words, f"Sent through the channel model")
 
 
 CHANNEL_PTH = "prob_tcn_for_LED/data/experiments/test_real_gridsearch/channel_models_20260824_1456/runs/tcn_b338d2dc"
+SAVE_PATH = f"prob_tcn_for_LED/sv_tcn/tcn6"
+DATA_WIDTH = 16
 
 base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
