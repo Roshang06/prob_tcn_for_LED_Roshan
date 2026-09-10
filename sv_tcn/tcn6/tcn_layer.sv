@@ -47,3 +47,11 @@ endgenerate
 
 assign out = hc_output;
 endmodule
+
+function automatic int tcn_layer_latency(int KERNEL_SIZE, int HIDDEN_CHANNELS, int RESAMPLE);
+    int latency;
+    if (RESAMPLE == 0) latency = 1 + Qxxmultiply_latency() + adder_tree_block_latency(KERNEL_SIZE*HIDDEN_CHANNELS + 1) + 3;
+    else if (RESAMPLE == 1) latency = 1 + Qxxmultiply_latency() + adder_tree_block_latency(KERNEL_SIZE + 1) + 3;
+    else if (RESAMPLE == 2) latency = 1 + Qxxmultiply_latency() + adder_tree_block_latency(HIDDEN_CHANNELS + 1) + 1;
+    return latency;
+endfunction

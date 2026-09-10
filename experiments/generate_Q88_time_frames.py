@@ -46,7 +46,7 @@ def read_dataset(path, n_frames: int = 64) -> torch.Tensor:#tuple[torch.Tensor, 
 
 READ_PATH = "prob_tcn_for_LED/data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
 SAVE_PATH = f"prob_tcn_for_LED/sv_tcn/tcn6"
-WAVEFORMS = 1
+WAVEFORMS = 4
 DATA_WIDTH = 16
 TYPE = "Synthetic"# Synthetic, Real, Step
 base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

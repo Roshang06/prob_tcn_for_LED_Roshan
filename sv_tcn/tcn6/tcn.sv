@@ -53,7 +53,7 @@ generate
     end
 endgenerate
 // 1: the in gets placed into input_reg, 5: Qxxmultiply, 2*$clog2(KERNEL_SIZE*HIDDEN_CHANNELS + 1): adder tree, 3: Relu, skip connection, and placing into the output reg
-localparam latency = (1 + 4 + $clog2(KERNEL_SIZE + 1) + 3) + ((LAYERS-1) * (1 + 4 + $clog2(KERNEL_SIZE*HIDDEN_CHANNELS + 1) + 3)) + (1 + 4 + $clog2(HIDDEN_CHANNELS + 1) + 1); 
+localparam latency = tcn_layer_latency(KERNEL_SIZE, HIDDEN_CHANNELS, 1) + ((LAYERS-1) * tcn_layer_latency(KERNEL_SIZE, HIDDEN_CHANNELS, 0)) + tcn_layer_latency(KERNEL_SIZE, HIDDEN_CHANNELS, 2); 
 initial begin
     $display("Network Latency: %0d", latency);
 end
@@ -63,13 +63,11 @@ assign yeet = counter[0];
 
 always_ff @(posedge clk) begin
     if (reset) begin
-        out <= '0;
         counter <= '0;
     end else begin
         counter <= {data_valid_in, counter[latency-1:1]};
-
-        out <= connections[LAYERS+1][0];
     end
 end
 assign data_valid_out = counter[0];
+assign out = connections[LAYERS+1][0];
 endmodule

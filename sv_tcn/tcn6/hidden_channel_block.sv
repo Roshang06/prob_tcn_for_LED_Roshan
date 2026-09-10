@@ -97,7 +97,7 @@ generate
         int signed preclipped;
         int signed relu_applied;
 
-        localparam int delay = $clog2(NUM_TAPS + 1) - 1; // Formula for synchronization delay (due to adder tree)
+        localparam int delay = adder_tree_block_latency(NUM_TAPS + 1) - 1; // Formula for synchronization delay
         logic signed [0:delay][DATA_WIDTH-1:0] waiting_line; 
         always_ff @(posedge clk) begin
             if (reset) begin
@@ -131,7 +131,7 @@ generate
         end
     end else begin: middle_layer // Below is the default generation for all other layers
         //assign out = (accumulator >= 0) ?  Q88clip(accumulator + input_reg[SKIPCONN]): input_reg[SKIPCONN]; //relu and residual input added in
-        localparam int delay = $clog2(NUM_TAPS + 1) + 4; // Formula for synchronization delay (due to adder tree and Qmutliply)
+        localparam int delay = adder_tree_block_latency(NUM_TAPS + 1) + Qxxmultiply_latency(); // Formula for synchronization delay (due to adder tree and Qmutliply)
         logic signed [0:delay][DATA_WIDTH-1:0] waiting_line;
         
         int signed preclipped;

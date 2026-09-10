@@ -27,3 +27,8 @@ always_ff @(posedge clk) begin
     end
 end
 endmodule
+
+function automatic int Qxxmultiply_latency();
+    int latency = 4;
+    return latency;
+endfunction
