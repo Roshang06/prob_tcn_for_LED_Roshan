@@ -64,7 +64,64 @@ def quantized_conv1d(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor,
     return acc
 
 class TCNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation, activation, weight_norm=False, quantization=None, **kwargs):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation, activation, weight_norm=False, **kwargs):
+        super().__init__()
+        self.conv = maybe_weight_norm(nn.Conv1d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            padding=0
+        ), weight_norm)
+        self.padding = (kernel_size - 1) * dilation
+        self.activation = make_activation(activation)
+        self.resample = None
+        if in_channels != out_channels:
+            self.resample = maybe_weight_norm(nn.Conv1d(in_channels, out_channels, kernel_size=1), weight_norm)
+
+    def forward(self, x):
+        out = F.pad(x, (self.padding, 0))
+        out = self.conv(out)
+        out = self.activation(out)
+        if self.resample:
+            x = self.resample(x)
+        return out + x  # residual connection
+
+class TCN(nn.Module):
+    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32,
+                 *, activation, **kwargs):
+        super().__init__()
+        layers = []
+        in_channels = 1
+        for i in range(nlayers):
+            dilation = dilation_base ** i
+            layers.append(
+                TCNBlock(in_channels, hidden_channels, kernel_size, dilation, activation)
+            )
+            in_channels = hidden_channels
+        self.tcn = nn.Sequential(*layers)
+        self.readout = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+
+        # Calculate the total receptive field for the whole TCN stack
+        self.receptive_field = 1
+        for i in range(nlayers):
+            dilation = dilation_base ** i
+            self.receptive_field += (kernel_size - 1) * dilation
+
+    def forward(self, xin):
+        x = xin.unsqueeze(1)    # [B,1,T]
+        out = self.tcn(x)       # [B,H,T]
+        out = self.readout(out).squeeze(1)
+        return out
+
+    def get_num_params(self):
+        total_params = 0
+        for param in self.parameters():
+            total_params += param.numel()
+        return total_params
+
+class QxxTCNBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation, activation, weight_norm=False, quantization: dict=None):
         super().__init__()
         self.conv = maybe_weight_norm(nn.Conv1d(
             in_channels,
@@ -81,38 +138,30 @@ class TCNBlock(nn.Module):
             self.resample = maybe_weight_norm(nn.Conv1d(in_channels, out_channels, kernel_size=1), weight_norm)
 
     def forward(self, x):
-        if not self.quantization:
-            out = F.pad(x, (self.padding, 0))
-            out = self.conv(out)
-            out = self.activation(out)
-            if self.resample:
-                x = self.resample(x)
-            return out + x  # residual connection
-        else:
-            x = quantize(x, self.quantization, self.quantization * 2)
-            out = F.pad(x, (self.padding, 0))
-            out = quantized_conv1d(
-                out,
-                quantize(self.conv.weight, self.quantization, self.quantization * 2),
-                quantize(self.conv.bias, self.quantization, self.quantization * 2),
-                dilation=self.conv.dilation[0],
-                frac_bits=self.quantization,
+        x = quantize(x, self.quantization.get("frac_bits"), self.quantization.get("data_width"))
+        out = F.pad(x, (self.padding, 0))
+        out = quantized_conv1d(
+            out,
+            quantize(self.conv.weight, self.quantization.get("frac_bits"), self.quantization.get("data_width")),
+            quantize(self.conv.bias, self.quantization.get("frac_bits"), self.quantization.get("data_width")),
+            dilation=self.conv.dilation[0],
+            frac_bits=self.quantization.get("frac_bits"),
+        )
+        out = self.activation(out)
+        if self.resample:
+            x = quantized_conv1d(
+                quantize(x, self.quantization.get("frac_bits"), self.quantization.get("data_width")),
+                quantize(self.resample.weight, self.quantization.get("frac_bits"), self.quantization.get("data_width")),
+                quantize(self.resample.bias, self.quantization.get("frac_bits"), self.quantization.get("data_width")),
+                dilation=1,
+                frac_bits=self.quantization.get("frac_bits"),
             )
-            out = self.activation(out)
-            if self.resample:
-                x = quantized_conv1d(
-                    quantize(x, self.quantization, self.quantization * 2),
-                    quantize(self.resample.weight, self.quantization, self.quantization * 2),
-                    quantize(self.resample.bias, self.quantization, self.quantization * 2),
-                    dilation=1,
-                    frac_bits=self.quantization,
-                )
-            return quantize((out + x), self.quantization, self.quantization * 2)
+        return quantize((out + x), self.quantization.get("frac_bits"), self.quantization.get("data_width"))
 
 
-class TCN(nn.Module):
-    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32, quantization=False,
-                 *, activation, **kwargs):
+class QxxTCN(nn.Module):
+    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32, quantization: dict=None,
+                 *, activation):
         super().__init__()
         layers = []
         in_channels = 1
@@ -132,24 +181,17 @@ class TCN(nn.Module):
             dilation = dilation_base ** i
             self.receptive_field += (kernel_size - 1) * dilation
 
-        print("The following is kwargs:")
-        print(kwargs)
-        print("--")
-
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]
         out = self.tcn(x)       # [B,H,T]
-        if self.quantization:
-            out = quantized_conv1d(
-                quantize(out, self.quantization, self.quantization * 2),
-                quantize(self.readout.weight, self.quantization, self.quantization * 2),
-                quantize(self.readout.bias, self.quantization, self.quantization * 2),
-                dilation=1,
-                frac_bits=self.quantization,
-            ).squeeze(1)
-            out = quantize(out, self.quantization, self.quantization * 2)
-        else:
-            out = self.readout(out).squeeze(1)
+        out = quantized_conv1d(
+            quantize(out, self.quantization.get("frac_bits"), self.quantization.get("data_width")),
+            quantize(self.readout.weight, self.quantization.get("frac_bits"), self.quantization.get("data_width")),
+            quantize(self.readout.bias, self.quantization.get("frac_bits"), self.quantization.get("data_width")),
+            dilation=1,
+            frac_bits=self.quantization.get("frac_bits"),
+        ).squeeze(1)
+        out = quantize(out, self.quantization.get("frac_bits"), self.quantization.get("data_width"))
         return out
 
     def get_num_params(self):

@@ -96,18 +96,38 @@ ENCODER_DECODER_GRID = {
     "constellation":      "qpsk",
     "preamble_amplitude": 3.0,
     "Mix-Match_Archs": False,
-    "params": {
-        "nlayers":         [3],
-        "dilation_base":   2,
-        "kernel_size":     5,
-        "hidden_channels": [8],
-        "epochs":          1000,
-        "lr":              1e-3,
-        "weight_decay":    1e-5,
-        "batch_size":      8,
-        "activation":       "relu",
-        "quantization":     [None, 4]
-    },
+    "models": [
+        {
+            "model": "tcn_ae",
+            "params": {
+                    "nlayers":         [3],
+                    "dilation_base":   2,
+                    "kernel_size":     5,
+                    "hidden_channels": [8],
+                    "epochs":          1000,
+                    "lr":              1e-3,
+                    "weight_decay":    1e-5,
+                    "batch_size":      8,
+                    "activation":       "relu",
+                    "quantization":     None
+            },
+        },
+        {
+            "model": "Qxx_tcn",
+            "params": {
+                    "nlayers":         [3],
+                    "dilation_base":   2,
+                    "kernel_size":     5,
+                    "hidden_channels": [8],
+                    "epochs":          1000,
+                    "lr":              1e-3,
+                    "weight_decay":    1e-5,
+                    "batch_size":      8,
+                    "activation":       "relu",
+                    "quantization":     [{"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 10}, {"frac_bits": 7, "data_width": 10}]
+            },
+        },
+    ]
 }
 
 

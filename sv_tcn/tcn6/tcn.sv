@@ -1,6 +1,6 @@
 `include "tcn_layer.sv"
 
-module tcn #(parameter TEST, DATA_WIDTH, HIDDEN_CHANNELS, KERNEL_SIZE, LAYERS, DIALATION_BASE, parameter [0:55] MODEL_TYPE) (
+module tcn #(parameter TEST, DATA_WIDTH, FRAC_BITS, HIDDEN_CHANNELS, KERNEL_SIZE, LAYERS, DIALATION_BASE, parameter [0:55] MODEL_TYPE) (
     input clk, reset, data_valid_in,
     input logic signed [DATA_WIDTH-1:0] in,
     output logic signed [DATA_WIDTH-1:0] out,
@@ -16,7 +16,8 @@ generate
         if (i == 0) begin : first_layer
             tcn_layer #(
                 .TEST(TEST), 
-                .DATA_WIDTH(DATA_WIDTH), 
+                .DATA_WIDTH(DATA_WIDTH),
+                .FRAC_BITS(FRAC_BITS), 
                 .DIALATION(DIALATION_BASE ** i), 
                 .IN_CH(1), 
                 .OUT_CH(HIDDEN_CHANNELS), 
@@ -28,7 +29,8 @@ generate
         end else if (i == LAYERS) begin : readout_layer
             tcn_layer #(
                 .TEST(TEST), 
-                .DATA_WIDTH(DATA_WIDTH), 
+                .DATA_WIDTH(DATA_WIDTH),
+                .FRAC_BITS(FRAC_BITS), 
                 .DIALATION(1), 
                 .IN_CH(HIDDEN_CHANNELS), 
                 .OUT_CH(1), 
@@ -40,7 +42,8 @@ generate
         end else begin : regular_layer
             tcn_layer #(
                 .TEST(TEST), 
-                .DATA_WIDTH(DATA_WIDTH), 
+                .DATA_WIDTH(DATA_WIDTH),
+                .FRAC_BITS(FRAC_BITS), 
                 .DIALATION(DIALATION_BASE ** i), 
                 .IN_CH(HIDDEN_CHANNELS), 
                 .OUT_CH(HIDDEN_CHANNELS), 
@@ -59,7 +62,7 @@ initial begin
 end
 logic [latency-1:0] counter;
 wire yeet;
-assign yeet = counter[0];
+assign yeet = counter[0]; //redundant
 
 always_ff @(posedge clk) begin
     if (reset) begin

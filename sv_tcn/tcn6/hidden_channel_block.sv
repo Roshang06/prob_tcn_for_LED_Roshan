@@ -1,7 +1,7 @@
 `include "adder_tree_block.sv"
 `include "Qxxmultiply.sv"
 
-module hidden_channel_block # (parameter int NUM_TAPS, DATA_WIDTH, SKIPCONN, TEST, LAYER_NUM, HIDDEN_CH_NUM, RESAMPLE, parameter [0:55] MODEL_TYPE) (
+module hidden_channel_block # (parameter int NUM_TAPS, DATA_WIDTH, FRAC_BITS, SKIPCONN, TEST, LAYER_NUM, HIDDEN_CH_NUM, RESAMPLE, parameter [0:55] MODEL_TYPE) (
     input logic signed [0:NUM_TAPS-1][DATA_WIDTH-1:0] input_reg,
     input clk, reset,
     output logic [DATA_WIDTH-1:0] out
@@ -47,7 +47,7 @@ end
 
 generate
     for (genvar i = 0; i < NUM_TAPS; i++) begin: multiply_inst
-        Qxxmultiply #(.DATA_WIDTH(DATA_WIDTH)) 
+        Qxxmultiply #(.DATA_WIDTH(DATA_WIDTH), .FRAC_BITS(FRAC_BITS)) 
         multiply_block (
             .clk(clk), 
             .reset(reset), 
@@ -84,7 +84,7 @@ generate
         // assign out = (accumulator >= 0) ?  Q88clip(accumulator + resampled_input): (resampled_input); //relu and resampled input
 
         int signed pre_bias;
-        Qxxmultiply # (.DATA_WIDTH(DATA_WIDTH)) 
+        Qxxmultiply # (.DATA_WIDTH(DATA_WIDTH), .FRAC_BITS(FRAC_BITS)) 
         resample_multiply_block (
             .clk(clk), 
             .reset(reset), 

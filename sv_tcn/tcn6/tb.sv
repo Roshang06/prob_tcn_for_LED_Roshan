@@ -3,6 +3,7 @@
 module tb ();
 
 parameter int DATA_WIDTH = 16;
+parameter int FRAC_BITS = $ceil(DATA_WIDTH / 2);
 parameter string MODEL_TYPE = "encoder";
 parameter int TEST = 1;
 localparam int K = 5;
@@ -33,6 +34,7 @@ logic reset;
 tcn #(
     .TEST(TEST), 
     .DATA_WIDTH(DATA_WIDTH), 
+    .FRAC_BITS(FRAC_BITS),
     .KERNEL_SIZE(K), .LAYERS(L), 
     .HIDDEN_CHANNELS(HC), 
     .DIALATION_BASE(D), 
@@ -61,7 +63,7 @@ initial begin
     //filePath = $sformatf("TestingData/Test%0d/py_output.mem", TEST);
     //$readmemh(filePath, desiredOutput, 0, SAMPLES-1);
 
-    if (FINISH_TIME < 26634) begin
+    if (FINISH_TIME < 5000) begin
         $dumpfile("tb.vcd");
         $dumpvars(1, tb.currentIn, tb.out);
         $dumpvars(1, tb.clk, tb.reset, tb.switch, tb.update_cycle, tb.Network1.yeet);

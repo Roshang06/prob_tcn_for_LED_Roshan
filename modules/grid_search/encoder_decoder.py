@@ -20,11 +20,16 @@ from modules.experimental_blocks import band_limited_zc_preamble
 from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
-from modules.models import TCN
+from modules.models import TCN, QxxTCN
 from modules.utils import (calculate_BER, calculate_per_burst_rrmse_pct_loss, evm_pct, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time)
 
 ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation", "quantization")
+
+ED_MODELS = {
+    "tcn_ae": TCN,
+    "Qxx_tcn": QxxTCN,
+}
 
 
 class EncoderDecoderGridSearch(GridSearchBase):
@@ -50,7 +55,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self.preamble_length = preamble_length
         self.mix = grid_config["Mix-Match_Archs"]
 
-        ed_points = expand_grid([{"model": "tcn_ae", "params": grid_config["params"]}])
+        ed_points = expand_grid(grid_config["models"])
         points = [{**p, "channel_run_id": run_id} for p in ed_points for run_id in self.channel_models] if not self.mix else [{**p, "decoder": {**d},  "channel_run_id": run_id} for p in ed_points for d in ed_points for run_id in self.channel_models]
 
         shared_params = {k: v for k, v in grid_config.items() if k != "params"}
@@ -203,8 +208,8 @@ class EncoderDecoderGridSearch(GridSearchBase):
             torch.manual_seed(seed)
 
         arch = {k: p[k] for k in ARCH_KEYS}
-        encoder = TCN(**arch).to(self.device)
-        decoder = TCN(**arch).to(self.device) if not self.mix else TCN(**{k: point["decoder"]["params"][k] for k in ARCH_KEYS}).to(self.device)
+        encoder = ED_MODELS[point["model"]](**arch).to(self.device)
+        decoder = ED_MODELS[point["model"]](**arch).to(self.device) if not self.mix else ED_MODELS[point["model"]](**{k: point["decoder"]["params"][k] for k in ARCH_KEYS}).to(self.device)
         optimizer = optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()),
                                  lr=float(p["lr"]),
                                  weight_decay=float(p.get("weight_decay", 0.0)))
@@ -298,8 +303,8 @@ class EncoderDecoderGridSearch(GridSearchBase):
         metrics = self._evaluate(encoder, decoder, channel_model, ofdm_config, num_bits, batch_size)
         metrics["num_params"] = encoder.get_num_params() + decoder.get_num_params()
         metrics["channel_run_id"] = point["channel_run_id"]
-        metrics["encoder"] = p
         if self.mix:
+            metrics["encoder"] = p
             metrics["decoder"] = point["decoder"]["params"]
 
         # propagate channel model metadata

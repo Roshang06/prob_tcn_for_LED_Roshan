@@ -189,3 +189,17 @@ def q88_hex_to_float(hexa: str, data_width):
     if v & sign_bit:  # If the sign bit is set (negative)
         v -= 1 << data_width
     return v / pow(2, data_width // 2)
+
+def save_mem_file(path: str, values: list, comment: str = "", printDebug=True):
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+    with open(path, "w") as f:
+        if comment:
+            f.write(f"// {comment}\n")
+        for v in values:
+            f.write(v + "\n")
+
+    if printDebug:
+        print(f"  Saved {len(values)} values → {path}")

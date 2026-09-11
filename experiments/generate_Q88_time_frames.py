@@ -1,14 +1,14 @@
-import zarr
-import torch
 import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+import zarr
+import torch
 import numpy as np
 import math
-# Ensure repo root is on the path regardless of launch location
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.chdir(Path(__file__).resolve().parents[1])
-
 from modules.grid_search import EncoderDecoderGridSearch
 from modules.utils import q88_int_to_hex, float_to_q88_int
 from experiments.test_real_gridsearch import (
@@ -44,12 +44,11 @@ def read_dataset(path, n_frames: int = 64) -> torch.Tensor:#tuple[torch.Tensor, 
 
 
 
-READ_PATH = "prob_tcn_for_LED/data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
-SAVE_PATH = f"prob_tcn_for_LED/sv_tcn/tcn6"
-WAVEFORMS = 4
+READ_PATH = "data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
+SAVE_PATH = f"sv_tcn/tcn6"
+WAVEFORMS = 1
 DATA_WIDTH = 16
 TYPE = "Synthetic"# Synthetic, Real, Step
-base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 ed_gs = EncoderDecoderGridSearch(
             ENCODER_DECODER_GRID,

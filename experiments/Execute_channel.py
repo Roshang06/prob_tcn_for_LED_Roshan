@@ -1,12 +1,12 @@
-import torch
 import os
 import sys
 from pathlib import Path
-import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.chdir(Path(__file__).resolve().parents[1])
+base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+import torch
+import yaml
 from modules.grid_search.adapters import TCNAdapter
 from modules.utils import q88_int_to_hex, q88_hex_to_float, float_to_q88_int
 
@@ -55,11 +55,9 @@ def Execute_Channel(data_width, Channel_pth, Save_pth):
         save_mem_file(os.path.join(base_pth, Save_pth, "recieved_time.mem"), words, f"Sent through the channel model")
 
 
-CHANNEL_PTH = "prob_tcn_for_LED/data/experiments/test_real_gridsearch/channel_models_20260824_1456/runs/tcn_b338d2dc"
-SAVE_PATH = f"prob_tcn_for_LED/sv_tcn/tcn6"
+CHANNEL_PTH = "data/experiments/test_real_gridsearch/channel_models_20260911_0902/runs/tcn_b338d2dc"
+SAVE_PATH = f"sv_tcn/tcn6"
 DATA_WIDTH = 16
-
-base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 if __name__ == "__main__":
 

@@ -1,18 +1,20 @@
-import torch
 import os
 import sys
 from pathlib import Path
-import yaml
-import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.chdir(Path(__file__).resolve().parents[1])
+#os.chdir(Path(__file__).resolve().parents[1])
+base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+import torch
+import yaml
+import matplotlib.pyplot as plt
 from modules.models import TCN
 from modules.utils import evm_pct, calculate_per_burst_rrmse_pct_loss   
 from modules.grid_search.adapters import TCNAdapter
 from modules.utils import q88_hex_to_float
 from modules.grid_search import EncoderDecoderGridSearch, base
+from modules.grid_search.encoder_decoder import ARCH_KEYS
 from experiments.test_real_gridsearch import (
     OFDM_CONFIG, ENCODER_DECODER_GRID
 )
@@ -26,15 +28,13 @@ ed_gs = EncoderDecoderGridSearch(
             dataset_path="nothing",
 )
 
-ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation", "quantization")
-
 #CHANNEL_PTH = f"prob_tcn_for_LED/data/experiments/test_real_gridsearch/channel_models_20260707_2205/runs/tcn_4712cb05"
-ED_MODEL_PTH = "prob_tcn_for_LED/data/experiments/test_real_gridsearch/encoder_decoder_20260824_1457/runs/tcn_ae_6f25ae0d" #PTQ model: tcn_ae_6f25ae0d
+ED_MODEL_PTH = "data/experiments/test_real_gridsearch/encoder_decoder_20260911_0905/runs/tcn_ae_6f25ae0d" #PTQ model: tcn_ae_6f25ae0d
 FILES = ["input_time_series.mem", "encoder_output.mem", "recieved_time.mem", "decoder_output.mem"]
 
-base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-def create_plots(data_width, ShowTimeSeries=False, ed_model_pth=ED_MODEL_PTH):
+
+def create_plots(data_width, ShowTimeSeries=False, ed_model_pth=ED_MODEL_PTH, plot_title="Qx.x"):
     py_freq = []
     with open(os.path.join(base_pth, ed_model_pth, "config.yaml"), "r") as file:
         config = yaml.safe_load(file)
@@ -71,10 +71,10 @@ def create_plots(data_width, ShowTimeSeries=False, ed_model_pth=ED_MODEL_PTH):
         #print(f"recieved av power: {torch.square(torch.mean(recieved_time))}")
         #print(f"decoded av power: {torch.square(torch.mean(decoded_time))}")
 
-        print(f"encoded average: {torch.mean(outp)}")
+        #print(f"encoded average: {torch.mean(outp)}")
         #print(f"encoded max: {torch.max(outp)}")
         #print(f"encoded min: {torch.min(outp)}")
-        print(f"decoded average: {torch.mean(decoded_time)}")
+        #print(f"decoded average: {torch.mean(decoded_time)}")
         #print(f"decoded max: {torch.max(decoded_time)}")
         #print(f"decoded min: {torch.min(decoded_time)}\n")
     
@@ -105,7 +105,7 @@ def create_plots(data_width, ShowTimeSeries=False, ed_model_pth=ED_MODEL_PTH):
     print(f"EVM: {evm_py}")
     print(f"RRMSE: {rrmse}")
 
-    ed_gs._plot_constellation_enhanced_for_sv(run_dir=Path(os.path.join(base_pth, SAVE_PATH)), sv=freq_tensors, py=py_freq, freqs=OFDM_CONFIG.subcarrier_freqs_hz, evm_sv=evm_sv, evm_py=evm_py, channel_type=f"QAT Q{data_width/2}.{data_width/2}")
+    ed_gs._plot_constellation_enhanced_for_sv(run_dir=Path(os.path.join(base_pth, SAVE_PATH)), sv=freq_tensors, py=py_freq, freqs=OFDM_CONFIG.subcarrier_freqs_hz, evm_sv=evm_sv, evm_py=evm_py, channel_type=plot_title)
 
     if ShowTimeSeries:
         plt.plot(all_time_series[1][0:(940 * WAVEFORMS)], label="SystemVerilog", marker='o')

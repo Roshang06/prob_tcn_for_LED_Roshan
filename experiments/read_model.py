@@ -1,13 +1,14 @@
-import torch
-import numpy
-import os
-import math
 import sys
+import os
 from pathlib import Path
-from modules.utils import q88_int_to_hex, float_to_q88_int
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.chdir(Path(__file__).resolve().parents[1])
+base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+import torch
+import numpy
+import math
+from modules.utils import q88_int_to_hex, float_to_q88_int
 
 def save_mem_file(path: str, values: list, comment: str = ""):
     """Save a list of Q8.8 integers to a .mem file (hex, one per line)."""
@@ -25,7 +26,7 @@ def save_mem_file(path: str, values: list, comment: str = ""):
 def read_model(read_pth, save_pth, datawidth):
     output_dir = os.path.join(base_pth, save_pth)
     os.makedirs(output_dir, exist_ok=True)
-    model = torch.load(os.path.join(base_pth, read_pth), weights_only=True)
+    model = torch.load(os.path.join(base_pth, read_pth, "model.pt"), weights_only=True)
 
     for type in ["encoder", "decoder"]:
         e_or_d = model[type]
@@ -49,12 +50,10 @@ def read_model(read_pth, save_pth, datawidth):
                 safe_key = key.replace('.', '_')
                 save_mem_file(os.path.join(output_dir, f"{type}", safe_key, f"channel{i}.mem"), save_arr, f"contains {len(arr)} values")
 
-TEST = 1
-READ_PATH = "prob_tcn_for_LED/data/experiments/test_real_gridsearch/encoder_decoder_20260824_1457/runs/tcn_ae_6f25ae0d/model.pt" # file path of the model.pt
-SAVE_PATH = f"prob_tcn_for_LED/sv_tcn/tcn5/TestingData/Test{TEST}" # relative
+TEST = 5
+READ_PATH = "data/experiments/test_real_gridsearch/encoder_decoder_20260911_0905/runs/tcn_ae_6f25ae0d" # file path of the model.pt
+SAVE_PATH = f"sv_tcn/tcn6/TestingData/Test{TEST}" # relative
 DATA_WIDTH = 16
-
-base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 if __name__ == "__main__":
     read_model(READ_PATH, SAVE_PATH, DATA_WIDTH)

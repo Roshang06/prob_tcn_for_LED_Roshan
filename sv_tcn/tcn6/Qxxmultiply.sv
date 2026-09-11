@@ -1,11 +1,11 @@
-module Qxxmultiply # (parameter int DATA_WIDTH) (
+module Qxxmultiply # (parameter int DATA_WIDTH, FRAC_BITS) (
     input clk, reset,
     input logic signed [DATA_WIDTH-1:0] input_reg, 
     input logic signed [DATA_WIDTH-1:0] weight,
     output logic signed [31:0] final_product
 );
 
-localparam qBitShift = DATA_WIDTH/2;
+localparam qBitShift = FRAC_BITS;
 logic signed [31:0] product;
 logic signed [31:0] product_out;
 logic signed [DATA_WIDTH-1:0] a;

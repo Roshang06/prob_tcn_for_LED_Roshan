@@ -1,6 +1,6 @@
 `include "hidden_channel_block.sv"
 
-module tcn_layer # (parameter TEST, DATA_WIDTH, DIALATION, IN_CH, OUT_CH, LAYER_NUM, KERNEL_SIZE, RESAMPLE, parameter [0:55] MODEL_TYPE) (
+module tcn_layer # (parameter TEST, DATA_WIDTH, FRAC_BITS, DIALATION, IN_CH, OUT_CH, LAYER_NUM, KERNEL_SIZE, RESAMPLE, parameter [0:55] MODEL_TYPE) (
     input clk, reset,
     input signed [IN_CH-1:0][DATA_WIDTH-1:0] in,
     output signed [OUT_CH-1:0][DATA_WIDTH-1:0] out
@@ -35,7 +35,8 @@ generate
 
         hidden_channel_block #(
             .NUM_TAPS(KERNEL_SIZE*IN_CH), 
-            .DATA_WIDTH(DATA_WIDTH), 
+            .DATA_WIDTH(DATA_WIDTH),
+            .FRAC_BITS(FRAC_BITS), 
             .SKIPCONN(KERNEL_SIZE*i + (KERNEL_SIZE-1)), 
             .TEST(TEST), .LAYER_NUM(LAYER_NUM), 
             .HIDDEN_CH_NUM(i), .RESAMPLE(RESAMPLE), 
