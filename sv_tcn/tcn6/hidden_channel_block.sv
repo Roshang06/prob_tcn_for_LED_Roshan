@@ -1,8 +1,8 @@
 `include "adder_tree_block.sv"
 `include "Qxxmultiply.sv"
 
-module hidden_channel_block # (parameter int NUM_TAPS, DATA_WIDTH, FRAC_BITS, SKIPCONN, TEST, LAYER_NUM, HIDDEN_CH_NUM, RESAMPLE, parameter [0:55] MODEL_TYPE) (
-    input logic signed [0:NUM_TAPS-1][DATA_WIDTH-1:0] input_reg,
+module hidden_channel_block # (parameter NUM_TAPS, DATA_WIDTH, FRAC_BITS, SKIPCONN, TEST, LAYER_NUM, HIDDEN_CH_NUM, RESAMPLE, MODEL_TYPE) (
+    input logic signed [DATA_WIDTH-1:0] input_reg [0:NUM_TAPS-1],
     input clk, reset,
     output logic [DATA_WIDTH-1:0] out
 );
@@ -69,9 +69,8 @@ adder_tree (
 generate
     string fileName;
     if (RESAMPLE == 1) begin: resample_weight_generate //generates this for the very first layer only
-        logic signed [DATA_WIDTH-1:0] resample_weight [0:0];
-        logic signed [DATA_WIDTH-1:0] resample_bias [0:0];
-        //logic signed [DATA_WIDTH-1:0] resampled_input;
+        logic signed [DATA_WIDTH-1:0] resample_weight [1];
+        logic signed [DATA_WIDTH-1:0] resample_bias [1];
 
         initial begin
             fileName = $sformatf("TestingData/Test%0d/%s/tcn_%0d_resample_weight/channel%0d.mem", TEST, MODEL_TYPE, LAYER_NUM, HIDDEN_CH_NUM);
@@ -79,9 +78,6 @@ generate
             fileName = $sformatf("TestingData/Test%0d/%s/tcn_%0d_resample_bias/channel%0d.mem", TEST, MODEL_TYPE, LAYER_NUM, HIDDEN_CH_NUM);
             $readmemh(fileName, resample_bias);
         end
-
-        // assign resampled_input = Q88clip(Q88multiply(input_reg[NUM_TAPS-1], resample_weight[0]) + resample_bias[0]);
-        // assign out = (accumulator >= 0) ?  Q88clip(accumulator + resampled_input): (resampled_input); //relu and resampled input
 
         int signed pre_bias;
         Qxxmultiply # (.DATA_WIDTH(DATA_WIDTH), .FRAC_BITS(FRAC_BITS)) 
@@ -98,14 +94,16 @@ generate
         int signed relu_applied;
 
         localparam int delay = adder_tree_block_latency(NUM_TAPS + 1) - 1; // Formula for synchronization delay
-        logic signed [0:delay][DATA_WIDTH-1:0] waiting_line; 
+        logic signed [DATA_WIDTH-1:0] waiting_line [delay + 1];
         always_ff @(posedge clk) begin
             if (reset) begin
                 unclipped_resampled_input <= 0;
                 preclipped <= 0;
                 relu_applied <= 0;
                 out <= '0;
-                waiting_line <= '0;
+                foreach(waiting_line[i]) begin
+                    waiting_line[i] <= '0;
+                end
             end else begin
                 unclipped_resampled_input <= pre_bias + resample_bias[0];
                 waiting_line[0] <= Q88clip(unclipped_resampled_input);
@@ -124,15 +122,13 @@ generate
             end
         end
     end else if (RESAMPLE == 2) begin: readout
-        //assign out = Q88clip(accumulator); //no relu or skip connection for the readout
         always_ff @(posedge clk) begin
             if (reset)  out <= '0;
             else out <= Q88clip(finalSum); // out 10
         end
     end else begin: middle_layer // Below is the default generation for all other layers
-        //assign out = (accumulator >= 0) ?  Q88clip(accumulator + input_reg[SKIPCONN]): input_reg[SKIPCONN]; //relu and residual input added in
         localparam int delay = adder_tree_block_latency(NUM_TAPS + 1) + Qxxmultiply_latency(); // Formula for synchronization delay (due to adder tree and Qmutliply)
-        logic signed [0:delay][DATA_WIDTH-1:0] waiting_line;
+        logic signed [DATA_WIDTH-1:0] waiting_line [delay + 1];
         
         int signed preclipped;
         int signed relu_applied;
@@ -141,7 +137,9 @@ generate
                 preclipped <= 0;
                 relu_applied <= 0;
                 out <= '0;
-                waiting_line <= '0;
+                foreach(waiting_line[i]) begin
+                    waiting_line[i] <= '0;
+                end
             end else begin
                 waiting_line[0] <= input_reg[SKIPCONN];
 

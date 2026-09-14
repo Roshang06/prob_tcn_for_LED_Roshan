@@ -1,13 +1,13 @@
 `include "tcn_layer.sv"
 
-module tcn #(parameter TEST, DATA_WIDTH, FRAC_BITS, HIDDEN_CHANNELS, KERNEL_SIZE, LAYERS, DIALATION_BASE, parameter [0:55] MODEL_TYPE) (
+module tcn #(parameter TEST, DATA_WIDTH, FRAC_BITS, HIDDEN_CHANNELS, KERNEL_SIZE, LAYERS, DIALATION_BASE, MODEL_TYPE) (
     input clk, reset, data_valid_in,
     input logic signed [DATA_WIDTH-1:0] in,
     output logic signed [DATA_WIDTH-1:0] out,
     output data_valid_out
 );
 // conections connects every input and output between layers.
-logic [0:LAYERS+1][HIDDEN_CHANNELS-1:0][DATA_WIDTH-1:0] connections;
+logic [HIDDEN_CHANNELS-1:0][DATA_WIDTH-1:0] connections [0:LAYERS+1];
 assign connections[0] = in; // these are not the same size, I am assuming in will be left padded with 0s, as well as a truncation of connections[0] when assigned to the first layer input
 
 genvar i;
@@ -55,7 +55,6 @@ generate
         end
     end
 endgenerate
-// 1: the in gets placed into input_reg, 5: Qxxmultiply, 2*$clog2(KERNEL_SIZE*HIDDEN_CHANNELS + 1): adder tree, 3: Relu, skip connection, and placing into the output reg
 localparam latency = tcn_layer_latency(KERNEL_SIZE, HIDDEN_CHANNELS, 1) + ((LAYERS-1) * tcn_layer_latency(KERNEL_SIZE, HIDDEN_CHANNELS, 0)) + tcn_layer_latency(KERNEL_SIZE, HIDDEN_CHANNELS, 2); 
 initial begin
     $display("Network Latency: %0d", latency);

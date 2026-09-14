@@ -4,15 +4,16 @@ module tb ();
 
 parameter int DATA_WIDTH = 16;
 parameter int FRAC_BITS = $ceil(DATA_WIDTH / 2);
-parameter string MODEL_TYPE = "encoder";
+parameter MODEL_TYPE = "encoder";
 parameter int TEST = 1;
-localparam int K = 5;
-localparam int L = 3;
-localparam int D = 2;
-localparam int HC = 8;
+parameter int K = 5;
+parameter int L = 3;
+parameter int D = 2;
+parameter int HC = 8;
+
+parameter SAMPLES = 5;
 
 localparam BUFFER_TIME = 500;
-parameter SAMPLES = 5;
 localparam CLK_TIME = 3;
 localparam UPDATE_TIME = CLK_TIME*2; //calculates time before the next input is sent in
 localparam FINISH_TIME = SAMPLES * UPDATE_TIME + BUFFER_TIME;

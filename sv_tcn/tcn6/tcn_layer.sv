@@ -1,16 +1,19 @@
 `include "hidden_channel_block.sv"
 
-module tcn_layer # (parameter TEST, DATA_WIDTH, FRAC_BITS, DIALATION, IN_CH, OUT_CH, LAYER_NUM, KERNEL_SIZE, RESAMPLE, parameter [0:55] MODEL_TYPE) (
+module tcn_layer # (parameter TEST, DATA_WIDTH, FRAC_BITS, DIALATION, IN_CH, OUT_CH, LAYER_NUM, KERNEL_SIZE, RESAMPLE, MODEL_TYPE) (
     input clk, reset,
     input signed [IN_CH-1:0][DATA_WIDTH-1:0] in,
     output signed [OUT_CH-1:0][DATA_WIDTH-1:0] out
 );
-logic signed [0:(KERNEL_SIZE-1)*DIALATION][IN_CH-1:0][DATA_WIDTH-1:0] input_reg;
+logic signed [IN_CH-1:0][DATA_WIDTH-1:0] input_reg [0:(KERNEL_SIZE-1)*DIALATION];
 
 //manage the input stream in a buffer
 always_ff @(posedge clk) begin
     if (reset) begin
-        input_reg <= '0;
+        //input_reg <= '0;
+        foreach(input_reg[i]) begin
+            input_reg[i] <= '0;
+        end
     end else begin
         for (int i = 1; i < $size(input_reg); i++) begin
             input_reg[i] <= input_reg[i-1];
@@ -19,7 +22,7 @@ always_ff @(posedge clk) begin
     end
 end
 //wire up hidden channels - Each hidden_channel_block gives you 1 output
-logic signed [0:KERNEL_SIZE*IN_CH-1][DATA_WIDTH-1:0] actual_input_reg;
+logic signed [DATA_WIDTH-1:0] actual_input_reg [0:KERNEL_SIZE*IN_CH-1];
 logic [OUT_CH-1:0][DATA_WIDTH-1:0] hc_output;
 
 generate

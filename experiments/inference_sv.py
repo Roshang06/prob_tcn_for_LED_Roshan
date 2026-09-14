@@ -39,7 +39,7 @@ ed_gs = EncoderDecoderGridSearch(
             dataset_path="nothing",
 )
 
-def create_plots(data_width, ShowTimeSeries=False, ed_model_pth=ED_MODEL, plot_title="Qx.x"):
+def create_plots(data_width, sent_time, ShowTimeSeries=False, ed_model_pth=ED_MODEL, plot_title="Qx.x"):
     py_freq = []
     with open(os.path.join(base_pth, ed_model_pth, "config.yaml"), "r") as file:
         config = yaml.safe_load(file)
@@ -51,7 +51,7 @@ def create_plots(data_width, ShowTimeSeries=False, ed_model_pth=ED_MODEL, plot_t
         encoder.eval()
 
         #ed_gs.preamble = torch.tensor(band_limited_zc_preamble(256, OFDM_CONFIG.subcarrier_spacing*OFDM_CONFIG.baseband_fft_length, float(300000.0), float(7600000.0), 3.0), dtype=torch.float32, device="cpu").unsqueeze(0)
-        in_time = create_sent_time()
+        in_time = sent_time
         #preamble, symbol = in_time[:, :256], in_time[:, 256:]
         py_freq.append(ed_gs._frame_to_freq(in_time, OFDM_CONFIG))
 
@@ -171,13 +171,14 @@ def create_sent_time():
         raise ValueError("TYPE was not correctly specified.")
 
 def writeSentTime(save_pth, datawidth):
-    sent_time= create_sent_time()
+    sent_time = create_sent_time()
     time_series = []
     tensor_time_series = sent_time.detach().cpu().numpy()
     for burst in tensor_time_series:    
             for point in burst:
                 time_series.append(q88_int_to_hex(float_to_q88_int(point, data_width=datawidth), data_width=datawidth))
     save_mem_file(os.path.join(base_pth, save_pth, "input_time_series.mem"), time_series, "OFDM modulated time series - includes cyclic prefix and preamble")
+    return sent_time
 
 def read_model(read_pth, save_pth, datawidth):
     output_dir = os.path.join(base_pth, save_pth)
@@ -232,7 +233,7 @@ def Execute_Channel(data_width, Channel_pth, Save_pth):
         save_mem_file(os.path.join(base_pth, Save_pth, "recieved_time.mem"), words, f"Sent through the channel model")
 
 if __name__ == "__main__":
-    writeSentTime(SAVE_PATH, DATA_WIDTH)
+    sent_time = writeSentTime(SAVE_PATH, DATA_WIDTH)
     read_model(os.path.join(base_pth, ED_MODEL, "model.pt"), os.path.join(base_pth, SAVE_PATH, "TestingData", f"Test{TEST}"), DATA_WIDTH)
 
     print("Running encoder...")
@@ -271,4 +272,4 @@ if __name__ == "__main__":
     )
 
     print("Complete.\n")
-    create_plots(DATA_WIDTH, ShowTimeSeries=False, ed_model_pth=os.path.join(base_pth, ED_MODEL))
+    create_plots(DATA_WIDTH, sent_time, ShowTimeSeries=False, ed_model_pth=os.path.join(base_pth, ED_MODEL))

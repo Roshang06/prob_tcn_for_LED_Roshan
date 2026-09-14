@@ -14,6 +14,7 @@ import torch
 import torch.optim as optim
 import yaml
 from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
 
 from modules.constellation_diagram import get_constellation
 from modules.experimental_blocks import band_limited_zc_preamble
@@ -307,6 +308,10 @@ class EncoderDecoderGridSearch(GridSearchBase):
             metrics["encoder"] = p
             metrics["decoder"] = point["decoder"]["params"]
 
+        if point["model"] != "tcn_ae":
+            metrics["bit_width"] = p.get("quantization").get("data_width")
+        # In the future, add: Power/Energy metric, RM/BOP/NABS (From adderCNN paper)
+
         # propagate channel model metadata
         ch_meta = self.channel_models[point["channel_run_id"]]
         metrics["channel_receptive_field"] = ch_meta.get("receptive_field")
@@ -332,8 +337,12 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz,
                                  channel_id=point["channel_run_id"], channel_type=ch_model_type, evm=evm)
         self._plot_constellation(run_dir, sent_freq, self._frame_to_freq(encoder(eval_sent_time), ofdm_config=ofdm_config), ofdm_config.subcarrier_freqs_hz, rec_title="encoded")
-        self._plot_position_error(run_dir, eval_sent_time[:, self.preamble_length:], decoded_time_eval[:, self.preamble_length:], ofdm_config.cyclic_prefix_length)
         return metrics
+
+    def run(self, **prepare_kwargs):
+        super().run(**prepare_kwargs)
+        self._plot_evm_vs_bitwidth(self.summary_dir)
+        return self.exp_dir
 
     # ------------------------------------------------------------------- plots
     def _plot_ber(self, run_dir, ber_curve):
@@ -397,8 +406,8 @@ class EncoderDecoderGridSearch(GridSearchBase):
         if len(sv) < 4 or len(py) < 4:
             raise ValueError("sv and py must each contain at least 4 frequency tensors: sent, encoded, channel output, decoded")
 
-        fig = Figure(figsize=(44, 10))
-        axes = fig.subplots(2, 8)
+        fig, axes = plt.subplots(2, 8, figsize=(44, 10))
+       # axes = fig.subplots(2, 8)
 
         def plot_stage(ax, main, freqs, title, reference=None):
             main_np = main.detach().cpu().numpy()
@@ -458,24 +467,65 @@ class EncoderDecoderGridSearch(GridSearchBase):
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S").replace(" ", "").replace(":", "-")
         fig.savefig(run_dir / "plots" / f"constellation_{current_time}.png", dpi=120)
+        return fig
 
-    def _plot_position_error(self, run_dir, sent_time, decoded_time, cp_len):
-        '''Per-timestep squared error, aligned to the CP boundary. If error is
-        concentrated in the first N samples after the CP, that's boundary
-        zero-padding contamination bleeding past the guard interval — not a
-        global reconstruction quality issue.'''
-        with torch.no_grad():
-            err = (sent_time - decoded_time).pow(2).mean(dim=0).cpu().numpy()  # [T]
+    def _plot_evm_vs_bitwidth(self, run_dir, show_best_line=False):
+        data = self.all_metrics
+        bit_widths_all = [d.get("bit_width") for d in data if "bit_width" in d]
+        rrmse_all = [d.get("rrmse_pct") for d in data if "bit_width" in d]
 
-        fig = Figure(figsize=(8, 4))
-        ax = fig.subplots()
-        ax.plot(err)
-        ax.axvline(cp_len, color="r", lw=1, ls="--", label="CP boundary (scoring starts here)")
-        ax.set_xlabel("time index (0 = start of CP)")
-        ax.set_ylabel("mean squared error")
-        ax.set_title(f"{run_dir.name} — error vs position in frame")
-        ax.legend()
+        if not (len(bit_widths_all) == len(rrmse_all)):
+            raise ValueError("bit_width and rrmse_pct must be present for every point")
+
+        dot_color = "#2E86AB"
+        line_color = "#E4572E"
+
+        fig = Figure(figsize=(9, 6), dpi=150)
+        ax = fig.add_subplot(111)
+        ax.invert_xaxis()
+
+        # Scatter every point (duplicates per bit width included)
+        ax.scatter(bit_widths_all, rrmse_all, s=70, color=dot_color,
+                edgecolor="white", linewidth=1.0, zorder=3,
+                label="RRMSE (%)")
+
+        # Compute min rrmse per bit width, for optional line + annotations
+        best_by_bw = {}
+        for bw, r in zip(bit_widths_all, rrmse_all):
+            if bw not in best_by_bw or r < best_by_bw[bw]:
+                best_by_bw[bw] = r
+
+        sorted_bws = sorted(best_by_bw.keys(), reverse=True)
+        best_rrmse = [best_by_bw[bw] for bw in sorted_bws]
+
+        if show_best_line:
+            ax.plot(sorted_bws, best_rrmse, linestyle="--", linewidth=1.5,
+                    color=line_color, zorder=2, label="Best RRMSE per bit width")
+
+        # Annotate only the min-per-bitwidth points
+        for bw, r in zip(sorted_bws, best_rrmse):
+            ax.annotate(f"{r:.2f}%", (bw, r), textcoords="offset points",
+                        xytext=(0, 10), ha="center", fontsize=8.5, color=line_color)
+
+        ax.set_xlabel("Bit Width", fontsize=12, fontweight="bold")
+        ax.set_ylabel("RRMSE (%)", fontsize=12, fontweight="bold")
+        ax.set_title("RRMSE vs. Bit Width", fontsize=14, fontweight="bold", pad=15)
+
+        ax.set_xticks(sorted(set(bit_widths_all), reverse=True))
+        ax.margins(y=0.15)
         ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=10, frameon=True, framealpha=0.9, loc="upper right")
+        ax.tick_params(labelsize=10)
+
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
         fig.tight_layout()
-        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
-        fig.savefig(run_dir / "plots" / "position_error.png", dpi=120)
+
+        plots_dir = run_dir / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        out_path = plots_dir / "rrmse_vs_bitwidth.png"
+        fig.savefig(out_path, dpi=120)
+        #print(f"Saved plot to {out_path}")
+
+        return fig, ax

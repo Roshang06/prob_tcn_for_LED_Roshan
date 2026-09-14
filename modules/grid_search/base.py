@@ -98,6 +98,7 @@ class GridSearchBase:
         self.device = device
         self.seed = seed
         self.extra_manifest = extra_manifest or {}
+        self.all_metrics = []
 
         base = Path(experiments_dir) if experiments_dir else _REPO_DIR / "data" / "experiments"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -277,6 +278,7 @@ class GridSearchBase:
                 json.dump(metrics, f, indent=2)
             self._append_run_record(rid, point, metrics)
 
+            self.all_metrics.append(metrics)
             point_seconds.append(metrics["train_seconds"])
             elapsed = format_duration(sum(point_seconds))
             eta = format_duration(np.mean(point_seconds) * (len(self.points) - i - 1))

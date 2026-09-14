@@ -35,6 +35,10 @@ EXP_DIR   = Path("data/experiments/test_real_gridsearch")
 DEVICE    = "cuda"
 SEED      = 42
 
+# ── Experiment Dataset ────────────────────────────────────────────────────────
+SENT_BURST = "data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
+RECIEVED_BURST = "data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/received_burst"
+
 # ── Synthetic OFDM geometry ──────────────────────────────────────────────────
 K_MIN            = 3
 K_MAX            = 76
@@ -56,8 +60,8 @@ ofdm_modulator = ModulateDataOFDM(
 OFDM_CONFIG = OFDMConfig.from_modulator(ofdm_modulator)
 
 def read_dataset(n_frames: int = 64) -> tuple[torch.Tensor, torch.Tensor]:
-    sent_arr = zarr.open("data\dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr\sent_burst", mode='r')
-    recieved_arr = zarr.open("data\dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr\\received_burst", mode='r')
+    sent_arr = zarr.open(SENT_BURST, mode='r')
+    recieved_arr = zarr.open(RECIEVED_BURST, mode='r')
     """
     Shape: (5000, 940)
     Data Type: float32
@@ -77,10 +81,10 @@ CHANNEL_GRID = {
         {
             "model": "tcn",
             "params": {
-                "nlayers":          [3],
+                "nlayers":          2,
                 "dilation_base":    2,
-                "kernel_size":         5,
-                "hidden_channels":  [16],
+                "kernel_size":      4,
+                "hidden_channels":  8,
                 "learn_noise":      True,
                 "gaussian":         True,
                 "epochs":           100,
@@ -124,7 +128,7 @@ ENCODER_DECODER_GRID = {
                     "weight_decay":    1e-5,
                     "batch_size":      8,
                     "activation":       "relu",
-                    "quantization":     [{"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 10}, {"frac_bits": 7, "data_width": 10}]
+                    "quantization":     {"frac_bits": 8, "data_width": 16},
             },
         },
     ]
