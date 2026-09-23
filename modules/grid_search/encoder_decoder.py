@@ -21,15 +21,16 @@ from modules.experimental_blocks import band_limited_zc_preamble
 from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
-from modules.models import TCN, QxxTCN
+from modules.models import TCN, QxxTCN, AdderTCN
 from modules.utils import (calculate_BER, calculate_per_burst_rrmse_pct_loss, evm_pct, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time)
 
-ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation", "quantization")
+ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation")
 
 ED_MODELS = {
     "tcn_ae": TCN,
     "Qxx_tcn": QxxTCN,
+    "adder_tcn": AdderTCN,
 }
 
 
@@ -208,9 +209,9 @@ class EncoderDecoderGridSearch(GridSearchBase):
             np.random.seed(seed)
             torch.manual_seed(seed)
 
-        arch = {k: p[k] for k in ARCH_KEYS}
-        encoder = ED_MODELS[point["model"]](**arch).to(self.device)
-        decoder = ED_MODELS[point["model"]](**arch).to(self.device) if not self.mix else ED_MODELS[point["model"]](**{k: point["decoder"]["params"][k] for k in ARCH_KEYS}).to(self.device)
+        #arch = {k: p[k] for k in ARCH_KEYS}
+        encoder = ED_MODELS[point["model"]](**p).to(self.device)
+        decoder = ED_MODELS[point["model"]](**p).to(self.device) if not self.mix else ED_MODELS[point["model"]](**point["decoder"]["params"]).to(self.device)
         optimizer = optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()),
                                  lr=float(p["lr"]),
                                  weight_decay=float(p.get("weight_decay", 0.0)))
@@ -222,6 +223,12 @@ class EncoderDecoderGridSearch(GridSearchBase):
                 factor=float(p.get("factor", 0.5)),
                 patience=int(p["patience"]),
                 min_lr=float(p.get("min_lr", 1e-6)),
+            )
+        elif "cosineAnnealing_min_lr" in p:
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=int(p["epochs"]),
+                eta_min=float(p.get("cosineAnnealing_min_lr", 1e-6)),
             )
 
         num_bits = len(ofdm_config.active_carrier_indices) * self.constellation.bits_per_symbol
@@ -290,7 +297,10 @@ class EncoderDecoderGridSearch(GridSearchBase):
             loss.backward()
             optimizer.step()
             if scheduler is not None and (not annealing_active or epoch >= anneal_start_epoch):
-                scheduler.step(loss.item())
+                if isinstance(scheduler, optim.lr_scheduler.CosineAnnealingLR):
+                    scheduler.step()
+                else:
+                    scheduler.step(loss.item())
             history["loss"].append(loss.item())
             history["ber"].append(self._test_ber(encoder, decoder, channel_model, ofdm_config, eval_bits, eval_sent_time))
             history["lr"].append(optimizer.param_groups[0]["lr"])
@@ -336,12 +346,14 @@ class EncoderDecoderGridSearch(GridSearchBase):
         ch_model_type = f"{ch_meta.get('model', 'channel').upper()} {ch_meta.get('distribution', 'none')}"
         self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz,
                                  channel_id=point["channel_run_id"], channel_type=ch_model_type, evm=evm)
-        self._plot_constellation(run_dir, sent_freq, self._frame_to_freq(encoder(eval_sent_time), ofdm_config=ofdm_config), ofdm_config.subcarrier_freqs_hz, rec_title="encoded")
+        #self._plot_constellation(run_dir, sent_freq, self._frame_to_freq(encoder(eval_sent_time), ofdm_config=ofdm_config), ofdm_config.subcarrier_freqs_hz, rec_title="encoded")
+        sv = [sent_freq, self._frame_to_freq(encoder(eval_sent_time), ofdm_config=ofdm_config), self._frame_to_freq(decoded_time_eval, ofdm_config=ofdm_config),  recv_freq]
+        self._plot_constellation_enhanced_for_sv(run_dir, sv=sv,py=sv, freqs=ofdm_config.subcarrier_freqs_hz, evm_py=evm)
         return metrics
 
     def run(self, **prepare_kwargs):
         super().run(**prepare_kwargs)
-        self._plot_evm_vs_bitwidth(self.summary_dir)
+        self._plot_evm_vs_bitwidth(self.summary_dir, show_best_line=True)
         return self.exp_dir
 
     # ------------------------------------------------------------------- plots
@@ -474,8 +486,10 @@ class EncoderDecoderGridSearch(GridSearchBase):
         bit_widths_all = [d.get("bit_width") for d in data if "bit_width" in d]
         rrmse_all = [d.get("rrmse_pct") for d in data if "bit_width" in d]
 
-        if not (len(bit_widths_all) == len(rrmse_all)):
+        if len(bit_widths_all) != len(rrmse_all):
             raise ValueError("bit_width and rrmse_pct must be present for every point")
+        if len(bit_widths_all) == 0:
+            return
 
         dot_color = "#2E86AB"
         line_color = "#E4572E"

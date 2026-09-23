@@ -12,6 +12,7 @@ ACTIVATIONS = {
     "silu": nn.SiLU,
     "tanh": nn.Tanh,
     "softplus": nn.Softplus,
+    "sigmoid": nn.Sigmoid
 }
 
 def make_activation(name):
@@ -50,8 +51,7 @@ class TCNBlock(nn.Module):
 
 class TCN(nn.Module):
     BLOCK_CLASS = TCNBlock
-    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32,
-                 *, activation, **kwargs):
+    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32, *, activation, **kwargs):
         super().__init__()
         layers = []
         in_channels = 1
@@ -84,11 +84,9 @@ class TCN(nn.Module):
         return total_params
 
 class QxxTCNBlock(TCNBlock):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation, activation, weight_norm=False, quantization: dict=None):
-        assert quantization is not None, "quantization parameter must be defined"
-        assert "frac_bits" in quantization and "data_width" in quantization, 'quantization must contain values for keys "frac_bits" and "data_width"'
-        self.quantization = quantization
-        super().__init__(in_channels, out_channels, kernel_size, dilation, activation, weight_norm=weight_norm)
+    def __init__(self, *args, **kwargs):
+        self.quantization = kwargs["quantization"]
+        super().__init__(*args, **kwargs)
 
     def forward(self, x):
         # x = self.quantize(x)
@@ -110,11 +108,12 @@ class QxxTCNBlock(TCNBlock):
         return self.quantize(out + x)
 
     def quantize(self, x: torch.Tensor, clamp: bool=True) -> torch.Tensor:
-        data_width = self.quantization.get("data_width")
         frac_bits = self.quantization.get("frac_bits")
+        assert frac_bits is not None, "frac_bits cannot be of type None to use quantize()"
 
         resolution = 2 **  (-frac_bits)
         if clamp:
+            data_width = self.quantization.get("data_width")
             assert data_width is not None, "data_width must be provided to use clamp functionality in quantize()"
             min = -2 ** (data_width - 1)
             max = 2 ** (data_width - 1) - 1
@@ -133,8 +132,6 @@ class QxxTCNBlock(TCNBlock):
         weight = self.quantize(weight)
         bias = self.quantize(bias)
         x = self.quantize(x)
-        frac_bits = self.quantization.get("frac_bits")
-        assert frac_bits is not None, "frac_bits cannot be of type None to use quantized_conv1d()"
 
         B, Cin, Tp = x.shape
         Cout, _, K = weight.shape
@@ -145,7 +142,7 @@ class QxxTCNBlock(TCNBlock):
             x_slice = x[:, :, start:start + T_out]                       # [B, Cin, T_out]
             w_k = weight[:, :, k]                                        # [Cout, Cin]
             prod = x_slice.unsqueeze(1) * w_k.unsqueeze(0).unsqueeze(-1)  # [B, Cout, Cin, T_out]
-            prod = self.quantize(prod, clamp=False)                       # round EACH tap's product, no clip
+            prod = self.quantize(prod, clamp=False)                       # round no clipping
             acc = acc + prod.sum(dim=2)                                  # accumulate in full precision, like the int accumulator
         if bias is not None:
             acc = acc + bias.view(1, -1, 1)
@@ -153,13 +150,11 @@ class QxxTCNBlock(TCNBlock):
 
 class QxxTCN(TCN):
     BLOCK_CLASS = QxxTCNBlock
-    def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32, quantization: dict=None,
-                 *, activation):
-        assert quantization is not None, "quantization parameter must be defined"
-        assert "frac_bits" in quantization and "data_width" in quantization, 'quantization must contain values for keys "frac_bits" and "data_width"'
-        self.quantization = quantization
-        super().__init__(nlayers=nlayers, dilation_base=dilation_base, kernel_size=kernel_size, hidden_channels=hidden_channels, activation=activation, quantization=self.quantization)
-
+    def __init__(self, *args, **kwargs):
+        self.quantization = kwargs["quantization"]
+        assert self.quantization is not None, "quantization parameter must be defined"
+        assert "frac_bits" in self.quantization and "data_width" in self.quantization, 'quantization must contain values for keys "frac_bits" and "data_width"'
+        super().__init__(*args, **kwargs)
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]
         out = self.tcn(x)       # [B,H,T]
@@ -171,6 +166,75 @@ class QxxTCN(TCN):
         ).squeeze(1)
         out = self.tcn[0].quantize(out)
         return out
+
+class AdderTCNBlock(QxxTCNBlock):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        with torch.no_grad():
+            if self.resample:
+                self.resample.bias = None
+            self.conv.bias = None
+        self.bn = nn.BatchNorm1d(self.conv.out_channels)
+        if self.resample:
+            self.bn_resample = nn.BatchNorm1d(self.resample.out_channels)
+
+    def forward(self, x):
+        out = F.pad(x, (self.padding, 0))
+        out = self.quantized_conv1d(out, self.conv.weight, self.conv.bias, dilation=self.conv.dilation[0])
+        out = self.bn(out)
+        out = self.activation(out)
+        if self.resample:
+            x = self.quantized_conv1d(x, self.resample.weight, self.resample.bias, dilation=1)
+            x = self.bn_resample(x)
+        return self.quantize(out + x)
+    def quantized_conv1d(self, x, weight, bias, dilation):
+        weight = self.quantize(weight)
+        x = self.quantize(x)
+
+        B, Cin, Tp = x.shape
+        Cout, _, K = weight.shape # _ is Cin
+        T_out = Tp - (K - 1) * dilation
+        out = x.new_zeros(B, Cout, T_out)
+        for k in range(K):
+            start = k * dilation
+            x_slice = x[:, :, start:start + T_out]         #(B, Cin, alignedtime)               
+            w_k = weight[:, :, k]   #(Cout, Cin)                                     
+            l1_term = AdderFn.apply(x_slice.unsqueeze(1), w_k.unsqueeze(0).unsqueeze(-1)).sum(dim=2) #(B, 1, Cin, alignedtime) - (1, Cout, Cin, 1) = (B, Cout, Cin, alignedtime)
+            out = out + l1_term
+        if bias is not None:
+            bias = self.quantize(bias)
+            out = out + bias.view(1, -1, 1)
+        return out
+
+class AdderTCN(QxxTCN):
+    BLOCK_CLASS = AdderTCNBlock
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        with torch.no_grad():
+            self.readout.bias = None
+        self.readout_bn = nn.BatchNorm1d(1)
+    def forward(self, xin):
+        x = xin.unsqueeze(1)
+        out = self.tcn(x)
+        out = self.tcn[0].quantized_conv1d(out, self.readout.weight, self.readout.bias, dilation=1)
+        out = self.readout_bn(out).squeeze(1)
+        out = self.tcn[0].quantize(out)
+        return out
+
+class AdderFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, w):
+        diff = x - w
+        ctx.save_for_backward(w, x)
+        return -diff.abs()
+    @staticmethod
+    def backward(ctx, grad_output):
+        w, x = ctx.saved_tensors
+        diff = x - w
+        grad_w = (diff*grad_output).sum(dim=(0, 3), keepdim=True)
+        grad_w = grad_w/grad_w.norm(p=2).clamp(min=1e-12)*math.sqrt(w.size(1))/5
+        grad_x = (-diff.clamp(-1,1)*grad_output).sum(dim=1, keepdim=True) 
+        return grad_x, grad_w
 
 class TCN_channel(nn.Module):
     def __init__(self, nlayers=3, dilation_base=2, kernel_size=10,

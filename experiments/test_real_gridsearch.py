@@ -101,34 +101,51 @@ ENCODER_DECODER_GRID = {
     "preamble_amplitude": 3.0,
     "Mix-Match_Archs": False,
     "models": [
+        # {
+        #     "model": "tcn_ae",
+        #     "params": {
+        #             "nlayers":         3,
+        #             "dilation_base":   2,
+        #             "kernel_size":     5,
+        #             "hidden_channels": 8,
+        #             "epochs":          1000,
+        #             "lr":              1e-3,
+        #             "weight_decay":    1e-5,
+        #             "batch_size":      8,
+        #             "activation":       "relu",
+        #             "quantization":     None
+        #     },
+        # },
+        # {
+        #     "model": "Qxx_tcn",
+        #     "params": {
+        #             "nlayers":         3,
+        #             "dilation_base":   2,
+        #             "kernel_size":     5,
+        #             "hidden_channels": 8,
+        #             "epochs":          1000,
+        #             "lr":              1e-3,
+        #             "weight_decay":    1e-5,
+        #             "batch_size":      8,
+        #             "activation":       "relu",
+        #             "quantization":     {"frac_bits": 8, "data_width": 16},
+        #     },
+        # },
         {
-            "model": "tcn_ae",
+            "model": "adder_tcn",
             "params": {
-                    "nlayers":         [3],
+                    "nlayers":         3,
                     "dilation_base":   2,
                     "kernel_size":     5,
-                    "hidden_channels": [8],
+                    "hidden_channels": 8,
                     "epochs":          1000,
-                    "lr":              1e-3,
+                    "lr":              0.1,
                     "weight_decay":    1e-5,
                     "batch_size":      8,
                     "activation":       "relu",
-                    "quantization":     None
-            },
-        },
-        {
-            "model": "Qxx_tcn",
-            "params": {
-                    "nlayers":         [3],
-                    "dilation_base":   2,
-                    "kernel_size":     5,
-                    "hidden_channels": [8],
-                    "epochs":          1000,
-                    "lr":              1e-3,
-                    "weight_decay":    1e-5,
-                    "batch_size":      8,
-                    "activation":       "relu",
-                    "quantization":     {"frac_bits": 8, "data_width": 16},
+                    "quantization":     {"frac_bits": 16, "data_width": 32},
+                    "cosineAnnealing_min_lr": 1e-6,
+                    "W_init_normal": [True, False]
             },
         },
     ]
