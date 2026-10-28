@@ -5,7 +5,7 @@ module tb ();
 parameter int DATA_WIDTH = 16;
 parameter int FRAC_BITS = $ceil(DATA_WIDTH / 2);
 parameter MODEL_TYPE = "encoder";
-parameter THROUGHPUT = 8;
+parameter THROUGHPUT = 1;
 parameter int TEST = 1;
 parameter int K = 5;
 parameter int L = 3;
@@ -17,7 +17,7 @@ parameter SAMPLES = 6;
 localparam BUFFER_TIME = 500;
 localparam CLK_TIME = 3;
 localparam UPDATE_TIME = CLK_TIME*2; //calculates time before the next input is sent in
-localparam FINISH_TIME = SAMPLES * $ceil(real'(UPDATE_TIME)/real'(THROUGHPUT)) + BUFFER_TIME;
+localparam FINISH_TIME = UPDATE_TIME * $ceil(real'(SAMPLES)/real'(THROUGHPUT)) + BUFFER_TIME;
 
 string filePath = "input_time_series.mem";
 

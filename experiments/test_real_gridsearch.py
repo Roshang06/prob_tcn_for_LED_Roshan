@@ -116,21 +116,21 @@ ENCODER_DECODER_GRID = {
         #             "quantization":     None
         #     },
         # },
-        {
-            "model": "Qxx_tcn",
-            "params": {
-                    "nlayers":         2,
-                    "dilation_base":   2,
-                    "kernel_size":     3,
-                    "hidden_channels": 4,
-                    "epochs":          1000,
-                    "lr":              1e-3,
-                    "weight_decay":    1e-5,
-                    "batch_size":      8,
-                    "activation":       "relu",
-                    "quantization":     [{"frac_bits": 8, "data_width": 16}, {"frac_bits": 7, "data_width": 14}, {"frac_bits": 7, "data_width": 13}, {"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 11}, {"frac_bits": 5, "data_width": 10}, {"frac_bits": 5, "data_width": 9}, {"frac_bits": 4, "data_width": 8}, {"frac_bits": 3, "data_width": 7}, {"frac_bits": 3, "data_width": 6}, {"frac_bits": 2, "data_width": 5}, {"frac_bits": 2, "data_width": 4}],
-            },
-        },
+        # {
+        #     "model": "Qxx_tcn",
+        #     "params": {
+        #             "nlayers":         2,
+        #             "dilation_base":   2,
+        #             "kernel_size":     3,
+        #             "hidden_channels": 4,
+        #             "epochs":          1000,
+        #             "lr":              1e-3,
+        #             "weight_decay":    1e-5,
+        #             "batch_size":      8,
+        #             "activation":       "relu",
+        #             "quantization":     [{"frac_bits": 8, "data_width": 16}, {"frac_bits": 7, "data_width": 14}, {"frac_bits": 7, "data_width": 13}, {"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 11}, {"frac_bits": 5, "data_width": 10}, {"frac_bits": 5, "data_width": 9}, {"frac_bits": 4, "data_width": 8}, {"frac_bits": 3, "data_width": 7}, {"frac_bits": 3, "data_width": 6}, {"frac_bits": 2, "data_width": 5}, {"frac_bits": 2, "data_width": 4}],
+        #     },
+        # },
         {
             "model": "adder_tcn",
             "params": {
@@ -143,7 +143,7 @@ ENCODER_DECODER_GRID = {
                     "weight_decay":    1e-5,
                     "batch_size":      8,
                     "activation":       "relu",
-                    "quantization":     [{"frac_bits": 8, "data_width": 16}, {"frac_bits": 7, "data_width": 14}, {"frac_bits": 7, "data_width": 13}, {"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 11}, {"frac_bits": 5, "data_width": 10}, {"frac_bits": 5, "data_width": 9}, {"frac_bits": 4, "data_width": 8}, {"frac_bits": 3, "data_width": 7}, {"frac_bits": 3, "data_width": 6}, {"frac_bits": 2, "data_width": 5}, {"frac_bits": 2, "data_width": 4}],
+                    "quantization":     [{"frac_bits": 16, "data_width": 32}],#, {"frac_bits": 7, "data_width": 14}, {"frac_bits": 7, "data_width": 13}, {"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 11}, {"frac_bits": 5, "data_width": 10}, {"frac_bits": 5, "data_width": 9}, {"frac_bits": 4, "data_width": 8}, {"frac_bits": 3, "data_width": 7}, {"frac_bits": 3, "data_width": 6}, {"frac_bits": 2, "data_width": 5}, {"frac_bits": 2, "data_width": 4}],
                     "cosineAnnealing_min_lr": 1e-6,
             },
         },

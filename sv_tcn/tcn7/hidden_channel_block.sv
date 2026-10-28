@@ -159,11 +159,11 @@ generate
     end
 endgenerate
 
-function automatic int Q88clip(int signed a);
-    localparam int maximumVal = 2 ** (DATA_WIDTH - 1) - 1;
-    localparam int minimumVal = -1 * (2 ** (DATA_WIDTH - 1));
-    if (a > maximumVal) return maximumVal;
-    else if (a < minimumVal) return minimumVal;
-    else return a;
+function automatic logic signed [DATA_WIDTH-1:0] Q88clip(int signed a);
+    localparam int maximumVal = (1 << (DATA_WIDTH - 1)) - 1;
+    localparam int minimumVal = -(1 << (DATA_WIDTH - 1));
+    if (a > maximumVal) return maximumVal[DATA_WIDTH-1:0];
+    else if (a < minimumVal) return minimumVal[DATA_WIDTH-1:0];
+    else return a[DATA_WIDTH-1:0];
 endfunction
 endmodule

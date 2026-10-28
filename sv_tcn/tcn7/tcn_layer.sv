@@ -25,7 +25,6 @@ always_ff @(posedge clk) begin
 end
 //wire up hidden channels - Each hidden_channel_block gives you {THROUGHPUT} output(s)
 logic signed [0:KERNEL_SIZE*IN_CH-1][DATA_WIDTH-1:0] actual_input_reg [THROUGHPUT];
-logic signed [0:THROUGHPUT-1][OUT_CH-1:0][DATA_WIDTH-1:0] hc_out;
 generate
     for (genvar k = 0; k < THROUGHPUT; k++) begin: throughput
         for (genvar i = 0; i < KERNEL_SIZE; i++) begin: timeSeries
@@ -48,12 +47,11 @@ generate
                 .TEST(TEST), .LAYER_NUM(LAYER_NUM), 
                 .HIDDEN_CH_NUM(i), .RESAMPLE(RESAMPLE), 
                 .MODEL_TYPE(MODEL_TYPE)
-            ) hc (.input_reg(actual_input_reg[k]), .clk(clk), .reset(reset), .out(hc_out[k][i]));
+            ) hc (.input_reg(actual_input_reg[k]), .clk(clk), .reset(reset), .out(out[k][i]));
                 
         end
     end
 endgenerate
-assign out = hc_out;
 endmodule
 
 function automatic int tcn_layer_latency(int KERNEL_SIZE, int HIDDEN_CHANNELS, int RESAMPLE);

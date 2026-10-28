@@ -13,7 +13,7 @@ import yaml
 import zarr
 import matplotlib.pyplot as plt
 from modules.utils import save_mem_file
-from modules.models import TCN, QxxTCN
+from modules.models import TCN, QxxTCN, AdderTCN
 from modules.grid_search import EncoderDecoderGridSearch
 from modules.grid_search.encoder_decoder import ARCH_KEYS
 from modules.grid_search.adapters import TCNAdapter
@@ -23,15 +23,15 @@ from experiments.test_real_gridsearch import (
 )
 FILES = ["input_time_series.mem", "encoder_output.mem", "recieved_time.mem", "decoder_output.mem"]
 
-sim_directory = "sv_tcn/tcn7"
-DATA_WIDTH = 16
+sim_directory = "sv_tcn/adder_tcn"
+DATA_WIDTH = 32
 TEST = 1
 SAVE_PATH = f"{sim_directory}"
-ED_MODEL = "data/experiments/test_real_gridsearch/encoder_decoder_20260925_1312/runs/Qxx_tcn_efd24442"
+ED_MODEL = "data/experiments/test_real_gridsearch/encoder_decoder_20261005_1242/runs/adder_tcn_17fa38ce"#"data/experiments/test_real_gridsearch/encoder_decoder_20260929_1518/runs/adder_tcn_cdde6d53"
 CHANNEL_PTH = "data/experiments/test_real_gridsearch/channel_models_20260925_1310/runs/tcn_b338d2dc"
-TCN_NAME = QxxTCN
+TCN_NAME = AdderTCN
 DATA_PATH = "data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
-WAVEFORMS = 4
+WAVEFORMS = 1
 TYPE = "Synthetic"
 ed_gs = EncoderDecoderGridSearch(
             ENCODER_DECODER_GRID,
@@ -276,6 +276,7 @@ if __name__ == "__main__":
         text=True,
         check=True,
     )
+    print(result2.stdout)
     
     print("Running Channel Model...")
     Execute_Channel(DATA_WIDTH, CHANNEL_PTH, SAVE_PATH)
