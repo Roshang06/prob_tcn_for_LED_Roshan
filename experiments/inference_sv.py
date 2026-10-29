@@ -24,14 +24,18 @@ from experiments.test_real_gridsearch import (
 FILES = ["input_time_series.mem", "encoder_output.mem", "recieved_time.mem", "decoder_output.mem"]
 
 sim_directory = "sv_tcn/adder_tcn"
-DATA_WIDTH = 32
+DATA_WIDTH = 16
+K = 3
+L = 2
+D = 2
+HC = 4
 TEST = 1
 SAVE_PATH = f"{sim_directory}"
-ED_MODEL = "data/experiments/test_real_gridsearch/encoder_decoder_20261005_1242/runs/adder_tcn_17fa38ce"#"data/experiments/test_real_gridsearch/encoder_decoder_20260929_1518/runs/adder_tcn_cdde6d53"
+ED_MODEL = "data/experiments/test_real_gridsearch/encoder_decoder_20261028_1737/runs/adder_tcn_da721758"
 CHANNEL_PTH = "data/experiments/test_real_gridsearch/channel_models_20260925_1310/runs/tcn_b338d2dc"
 TCN_NAME = AdderTCN
 DATA_PATH = "data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
-WAVEFORMS = 1
+WAVEFORMS = 4
 TYPE = "Synthetic"
 ed_gs = EncoderDecoderGridSearch(
             ENCODER_DECODER_GRID,
@@ -263,7 +267,7 @@ if __name__ == "__main__":
 
     print("Running encoder...")
     result = subprocess.run(
-        ["iverilog", "-g2012", "-P", f'tb.MODEL_TYPE="encoder"', "-P", f"tb.TEST={TEST}", "-P", f"tb.DATA_WIDTH={DATA_WIDTH}", "-P", f"tb.SAMPLES={940 * WAVEFORMS}", "-o", "tb.vvp", "tb.sv"],
+        ["iverilog", "-g2012", "-P", f'tb.MODEL_TYPE="encoder"', "-P", f"tb.TEST={TEST}", "-P", f"tb.DATA_WIDTH={DATA_WIDTH}", "-P", f"tb.SAMPLES={940 * WAVEFORMS}", "-P", f"tb.K={K}", "-P", f"tb.L={L}", "-P", f"tb.D={D}", "-P", f"tb.HC={HC}", "-o", "tb.vvp", "tb.sv"],
         cwd=sim_directory,
         capture_output=True,
         text=True,
@@ -283,7 +287,7 @@ if __name__ == "__main__":
     
     print("Running decoder...")
     result3 = subprocess.run(
-        ["iverilog", "-g2012", "-P", f'tb.MODEL_TYPE="decoder"', "-P", f"tb.TEST={TEST}", "-P", f"tb.DATA_WIDTH={DATA_WIDTH}", "-P", f"tb.SAMPLES={940 * WAVEFORMS}", "-o", "tb.vvp", "tb.sv"],
+        ["iverilog", "-g2012", "-P", f'tb.MODEL_TYPE="decoder"', "-P", f"tb.TEST={TEST}", "-P", f"tb.DATA_WIDTH={DATA_WIDTH}", "-P", f"tb.SAMPLES={940 * WAVEFORMS}", "-P", f"tb.K={K}", "-P", f"tb.L={L}", "-P", f"tb.D={D}", "-P", f"tb.HC={HC}", "-o", "tb.vvp", "tb.sv"],
         cwd=sim_directory,
         capture_output=True,
         text=True,

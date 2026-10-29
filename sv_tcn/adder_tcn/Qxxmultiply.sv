@@ -1,14 +1,14 @@
-module Qxxmultiply # (parameter int DATA_WIDTH, FRAC_BITS) (
+module Qxxmultiply # (parameter int DATA_WIDTH, WEIGHT_WIDTH=DATA_WIDTH, FRAC_BITS) (
     input clk, reset,
     input logic signed [DATA_WIDTH-1:0] input_reg, 
-    input logic signed [DATA_WIDTH-1:0] weight,
-    output logic signed [DATA_WIDTH*2-1:0] final_product
+    input logic signed [WEIGHT_WIDTH-1:0] weight,
+    output logic signed [DATA_WIDTH + WEIGHT_WIDTH-1:0] final_product
 );
 
-logic signed [DATA_WIDTH*2-1:0] product;
-logic signed [DATA_WIDTH*2-1:0] product_out;
+logic signed [DATA_WIDTH + WEIGHT_WIDTH-1:0] product;
+logic signed [DATA_WIDTH + WEIGHT_WIDTH-1:0] product_out;
 logic signed [DATA_WIDTH-1:0] a;
-logic signed [DATA_WIDTH-1:0] b;
+logic signed [WEIGHT_WIDTH-1:0] b;
 
 always_ff @(posedge clk) begin
     if (reset) begin

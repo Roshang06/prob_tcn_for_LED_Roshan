@@ -33,9 +33,9 @@ initial begin
 end
 
 logic signed [0:NUM_TAPS-1][DATA_WIDTH:0] rounded_out;
-logic signed [DATA_WIDTH + $clog2(NUM_TAPS) -1:0] finalSum;
-logic signed [DATA_WIDTH-1:0] clipped_finalSum;
-logic signed [DATA_WIDTH*2-1:0] normed;
+logic signed [DATA_WIDTH + $clog2(NUM_TAPS):0] finalSum;
+//logic signed [DATA_WIDTH-1:0] clipped_finalSum;
+logic signed [(2*DATA_WIDTH + 1 + $clog2(NUM_TAPS))-1:0] normed;
 always_ff @(posedge clk) begin
     // if (reset) begin
     //     rounded_out[NUM_TAPS] <= 32'($signed(bias[0]));
@@ -75,23 +75,23 @@ adder_tree (
     .sum(finalSum) //6 + 6
 );
 
-assign clipped_finalSum = Q88clip(finalSum);
+// assign clipped_finalSum = Q88clip(finalSum);
 
-int sat_cnt = 0, cyc_cnt = 0;
-longint min_sum = 0;
-always @(posedge clk) if (!reset) begin
-        cyc_cnt++;
-        if (finalSum < -(1 <<< (DATA_WIDTH-1))) sat_cnt++;
-        if (finalSum < min_sum) min_sum = finalSum;
-end
-final $display("L%0d C%0d: sat %0d/%0d cycles, min finalSum %0d (%f)",
-            LAYER_NUM, HIDDEN_CH_NUM, sat_cnt, cyc_cnt, min_sum, real'(min_sum)/(real'(2) ** real'(FRAC_BITS)));
+// int sat_cnt = 0, cyc_cnt = 0;
+// longint min_sum = 0;
+// always @(posedge clk) if (!reset) begin
+//         cyc_cnt++;
+//         if (finalSum < -(1 <<< (DATA_WIDTH-1))) sat_cnt++;
+//         if (finalSum < min_sum) min_sum = finalSum;
+// end
+// final $display("L%0d C%0d: sat %0d/%0d cycles, min finalSum %0d (%f)",
+//             LAYER_NUM, HIDDEN_CH_NUM, sat_cnt, cyc_cnt, min_sum, real'(min_sum)/(real'(2) ** real'(FRAC_BITS)));
 
-Qxxmultiply # (.DATA_WIDTH(DATA_WIDTH), .FRAC_BITS(FRAC_BITS))
+Qxxmultiply # (.DATA_WIDTH(DATA_WIDTH+1 + $clog2(NUM_TAPS)), .WEIGHT_WIDTH(DATA_WIDTH), .FRAC_BITS(FRAC_BITS))
 BatchNorm_mult (
     .clk(clk), 
     .reset(reset), 
-    .input_reg(clipped_finalSum), 
+    .input_reg(finalSum), 
     .weight(bn_weight[0]), 
     .final_product(normed)
 );

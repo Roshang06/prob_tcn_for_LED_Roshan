@@ -5,7 +5,7 @@ module AdderConv # (parameter int DATA_WIDTH) (
     output logic signed [DATA_WIDTH:0] adder_out
 );
 
-logic signed [31:0] sub;
+logic signed [DATA_WIDTH:0] sub;
 
 always_ff @(posedge clk) begin
     if (reset) begin
